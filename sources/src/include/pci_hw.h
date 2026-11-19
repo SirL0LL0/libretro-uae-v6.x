@@ -128,6 +128,7 @@ struct pci_bridge
 	int phys_slot_cnt;
 	bool multiwindow;
 	int windowindex;
+	bool master_abort_buserror;
 };
 
 extern void pci_irq_callback(struct pci_board_state *pcibs, bool irq);

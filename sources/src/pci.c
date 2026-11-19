@@ -417,6 +417,20 @@ static struct pci_board_state *get_pci_board_state(struct pci_bridge *pcib, uaec
 	return NULL;
 }
 
+// No board claimed the cycle: a PCI master abort. PC host bridges end it
+// with all-ones on reads and drop writes, which stays the default. A bridge
+// set up for it ends the Amiga bus cycle with a bus error instead.
+static void pci_master_abort(uaecptr addr, int size, bool read, uae_u32 v)
+{
+	struct pci_bridge *pcib = get_pci_bridge(addr);
+	if (pcib && pcib->master_abort_buserror) {
+#if PCI_DEBUG_IO_MISS
+		write_log(_T("PCI master abort %c%d %08x PC=%08x\n"), read ? 'R' : 'W', 1 << size, addr, M68K_GETPC);
+#endif
+		hardware_exception2(addr, v, read, false, size);
+	}
+}
+
 static const pci_addrbank *get_pci_io(uaecptr *addrp, struct pci_board_state **pcibsp, int *endianswap, int size)
 {
 	uaecptr addr = *addrp;
@@ -818,6 +832,9 @@ static uae_u32 REGPARAM2 pci_io_lget(uaecptr addr)
 	int endianswap;
 	struct pci_board_state *pcibs;
 	const pci_addrbank *a = get_pci_io(&addr, &pcibs, &endianswap, 4);
+	if (!a) {
+		pci_master_abort(addr, sz_long, true, 0);
+	}
 	if (a && a->lget) {
 		v = a->lget(pcibs, addr);
 #if PCI_DEBUG_IO
@@ -838,6 +855,9 @@ static uae_u32 REGPARAM2 pci_io_wget(uaecptr addr)
 	int endianswap;
 	struct pci_board_state *pcibs;
 	const pci_addrbank *a = get_pci_io(&addr, &pcibs, &endianswap, 2);
+	if (!a) {
+		pci_master_abort(addr, sz_word, true, 0);
+	}
 	if (a && a->wget) {
 		if (endianswap) {
 			v = a->wget(pcibs, addr ^ (endianswap > 0 ? 2 : 0));
@@ -864,6 +884,9 @@ static uae_u32 REGPARAM2 pci_io_bget(uaecptr addr)
 	int endianswap;
 	struct pci_board_state *pcibs;
 	const pci_addrbank *a = get_pci_io(&addr, &pcibs, &endianswap, 1);
+	if (!a) {
+		pci_master_abort(addr, sz_byte, true, 0);
+	}
 	if (a && a->bget) {
 		if (endianswap) {
 			v = a->bget(pcibs, beswap(endianswap, addr));
@@ -889,6 +912,9 @@ static void REGPARAM2 pci_io_lput(uaecptr addr, uae_u32 b)
 	struct pci_board_state *pcibs;
 	uaecptr addr2 = addr;
 	const pci_addrbank *a = get_pci_io(&addr, &pcibs, &endianswap, -4);
+	if (!a) {
+		pci_master_abort(addr, sz_long, false, b);
+	}
 	if (a) {
 #if PCI_DEBUG_IO > 1
 		write_log(_T("pci_io_lput %08x = %08x = %08x\n"), addr, addr2, b);
@@ -912,6 +938,9 @@ static void REGPARAM2 pci_io_wput(uaecptr addr, uae_u32 b)
 	int endianswap;
 	struct pci_board_state *pcibs;
 	const pci_addrbank *a = get_pci_io(&addr, &pcibs, &endianswap, -2);
+	if (!a) {
+		pci_master_abort(addr, sz_word, false, b);
+	}
 	if (a) {
 		if (a->wput) {
 			if (endianswap) {
@@ -935,6 +964,9 @@ static void REGPARAM2 pci_io_bput(uaecptr addr, uae_u32 b)
 	int endianswap;
 	struct pci_board_state *pcibs;
 	const pci_addrbank *a = get_pci_io(&addr, &pcibs, &endianswap, -1);
+	if (!a) {
+		pci_master_abort(addr, sz_byte, false, b);
+	}
 	if (a) {
 		if (a->bput) {
 			if (endianswap) {
@@ -959,6 +991,9 @@ static uae_u32 REGPARAM2 pci_mem_lget(uaecptr addr)
 	int endianswap;
 	struct pci_board_state *pcibs;
 	const pci_addrbank *a = get_pci_mem(&addr, &pcibs, &endianswap);
+	if (!a) {
+		pci_master_abort(addr, sz_long, true, 0);
+	}
 	if (a && a->lget) {
 		v = a->lget(pcibs, addr);
 		if (endianswap)
@@ -972,6 +1007,9 @@ static uae_u32 REGPARAM2 pci_mem_wget(uaecptr addr)
 	int endianswap;
 	struct pci_board_state *pcibs;
 	const pci_addrbank *a = get_pci_mem(&addr, &pcibs, &endianswap);
+	if (!a) {
+		pci_master_abort(addr, sz_word, true, 0);
+	}
 	if (a && a->wget) {
 		if (endianswap) {
 			v = a->wget(pcibs, addr ^ (endianswap > 0 ? 2 : 0));
@@ -988,6 +1026,9 @@ static uae_u32 REGPARAM2 pci_mem_bget(uaecptr addr)
 	int endianswap;
 	struct pci_board_state *pcibs;
 	const pci_addrbank *a = get_pci_mem(&addr, &pcibs, &endianswap);
+	if (!a) {
+		pci_master_abort(addr, sz_byte, true, 0);
+	}
 	if (a) {
 		if (a->bget) {
 			if (endianswap) {
@@ -1009,6 +1050,9 @@ static void REGPARAM2 pci_mem_lput(uaecptr addr, uae_u32 b)
 	struct pci_board_state *pcibs;
 	uaecptr addr2 = addr;
 	const pci_addrbank *a = get_pci_mem(&addr, &pcibs, &endianswap);
+	if (!a) {
+		pci_master_abort(addr, sz_long, false, b);
+	}
 #if PCI_DEBUG_IO > 1
 	write_log(_T("pci_mem_lput %08x = %08x = %08x\n"), addr, addr2, b);
 #endif
@@ -1029,6 +1073,9 @@ static void REGPARAM2 pci_mem_wput(uaecptr addr, uae_u32 b)
 	int endianswap;
 	struct pci_board_state *pcibs;
 	const pci_addrbank *a = get_pci_mem(&addr, &pcibs, &endianswap);
+	if (!a) {
+		pci_master_abort(addr, sz_word, false, b);
+	}
 	if (a) {
 		if (a->wput) {
 			if (endianswap) {
@@ -1049,6 +1096,9 @@ static void REGPARAM2 pci_mem_bput(uaecptr addr, uae_u32 b)
 	int endianswap;
 	struct pci_board_state *pcibs;
 	const pci_addrbank *a = get_pci_mem(&addr, &pcibs, &endianswap);
+	if (!a) {
+		pci_master_abort(addr, sz_byte, false, b);
+	}
 	if (a) {
 		if (a->bput) {
 			if (endianswap) {
@@ -2007,6 +2057,7 @@ static bool prometheus_pci_init(struct autoconfig_info *aci)
 	if (!pcib)
 		return false;
 	pcib->label = _T("Prometheus");
+	pcib->master_abort_buserror = (rc->device_settings & 2) != 0;
 	pcib->endian_swap_config = 1;
 	pcib->endian_swap_io = -1;
 	pcib->endian_swap_memory = -1;
@@ -2044,6 +2095,7 @@ static bool prometheusfs_pci_init(struct autoconfig_info *aci)
 	if (!pcib)
 		return false;
 	pcib->label = _T("Prometheus FireStorm");
+	pcib->master_abort_buserror = (rc->device_settings & 2) != 0;
 	pcib->endian_swap_config = 1;
 	pcib->endian_swap_io = -1;
 	pcib->endian_swap_memory = -1;
@@ -2206,6 +2258,7 @@ static int mediator_get_index_4000(uaecptr addr, bool w, uae_u32 *vp)
 static void mediator_pci_init_1200(struct pci_bridge *pcib)
 {
 	pcib->label = _T("Mediator 1200");
+	pcib->master_abort_buserror = (pcib->rc->device_settings & 8) != 0;
 	pcib->endian_swap_config = -1;
 	pcib->endian_swap_io = -1;
 	pcib->endian_swap_memory = -1;
@@ -2293,6 +2346,7 @@ static addrbank *mediator_pci_init_1200_2(struct autoconfig_info *aci, struct ro
 static void mediator_pci_init_4000(struct pci_bridge *pcib)
 {
 	pcib->label = _T("Mediator 4000");
+	pcib->master_abort_buserror = (pcib->rc->device_settings & 8) != 0;
 	pcib->endian_swap_config = -1;
 	pcib->endian_swap_io = -1;
 	pcib->endian_swap_memory = -1;
