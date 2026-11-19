@@ -10,6 +10,7 @@
 #define UAE_XWIN_H
 
 #include "uae/types.h"
+#include "uae/time.h"
 #include "machdep/rpt.h"
 
 struct vidbuffer;
@@ -57,7 +58,7 @@ extern bool render_screen(int monid, int, bool);
 extern void show_screen(int monid, int mode);
 extern bool show_screen_maybe(int monid, bool);
 
-extern int lockscr(struct vidbuffer*, bool, bool, bool);
+extern int lockscr(struct vidbuffer*, bool, bool);
 extern void unlockscr(struct vidbuffer*, int, int);
 extern bool target_graphics_buffer_update(int monid, bool force);
 extern float target_adjust_vblank_hz(int monid, float);
@@ -69,49 +70,33 @@ float target_getcurrentvblankrate(int monid);
 
 extern int debuggable (void);
 extern void screenshot(int monid, int,int);
+// Save PNG to an explicit host path without changing screenshot preferences.
+extern bool screenshot_save(int monid, const TCHAR *path);
 void refreshtitle (void);
 
 extern int bits_in_mask (unsigned long mask);
 extern int mask_shift (unsigned long mask);
 extern uae_u32 doMask (uae_u32 p, int bits, int shift);
 extern uae_u32 doMask256 (int p, int bits, int shift);
-extern void alloc_colors64k (int monid, int, int, int, int, int, int, int, int, int, int, bool);
+extern void alloc_colors64k (int monid, int, int, int, int, int, int, int, int, int, int);
 extern void alloc_colors_rgb (int rw, int gw, int bw, int rs, int gs, int bs, int aw, int as, int alpha, int byte_swap,
 			      uae_u32 *rc, uae_u32 *gc, uae_u32 *bc);
 extern void alloc_colors_picasso (int rw, int gw, int bw, int rs, int gs, int bs, int rgbfmt, uae_u32 *rgbx16);
 extern float getvsyncrate(int monid, float hz, int *mult);
 
 
-    /* The graphics code has a choice whether it wants to use a large buffer
-     * for the whole display, or only a small buffer for a single line.
-     * If you use a large buffer:
-     *   - set bufmem to point at it
-     *   - set linemem to 0
-     *   - if memcpy within bufmem would be very slow, i.e. because bufmem is
-     *     in graphics card memory, also set emergmem to point to a buffer
-     *     that is large enough to hold a single line.
-     *   - implement flush_line to be a no-op.
-     * If you use a single line buffer:
-     *   - set bufmem and emergmem to 0
-     *   - set linemem to point at your buffer
-     *   - implement flush_line to copy a single line to the screen
-     */
 struct vidbuffer
 {
     /* Function implemented by graphics driver */
-    void (*flush_line)         (struct vidbuf_description *gfxinfo, struct vidbuffer *vb, int line_no);
-    void (*flush_block)        (struct vidbuf_description *gfxinfo, struct vidbuffer *vb, int first_line, int end_line);
-    void (*flush_screen)       (struct vidbuf_description *gfxinfo, struct vidbuffer *vb, int first_line, int end_line);
-    void (*flush_clear_screen) (struct vidbuf_description *gfxinfo, struct vidbuffer *vb);
     int  (*lockscr)            (struct vidbuf_description *gfxinfo, struct vidbuffer *vb);
     void (*unlockscr)          (struct vidbuf_description *gfxinfo, struct vidbuffer *vb);
-    uae_u8 *linemem;
-    uae_u8 *emergmem;
 
 	uae_u8 *bufmem, *bufmemend;
     uae_u8 *realbufmem;
 	uae_u8 *bufmem_allocated;
-	bool bufmem_lockable;
+	bool initialized;
+	bool locked;
+	bool vram_buffer;
     int rowbytes; /* Bytes per row in the memory pointed at by bufmem. */
     int pixbytes; /* Bytes per pixel. */
 	/* size of this buffer */
@@ -123,13 +108,8 @@ struct vidbuffer
 	/* nominal size of image for centering */
 	int inwidth;
 	int inheight;
-	/* same but doublescan multiplier included */
-	int inwidth2;
-	int inheight2;
-	/* use drawbuffer instead */
-	bool nativepositioning;
-	/* tempbuffer in use */
-	bool tempbufferinuse;
+	/* static, hardwired screen position and size (A2024) */
+	bool hardwiredpositioning;
 	/* extra width, chipset hpos extra in right border */
 	int extrawidth, extraheight;
 
@@ -146,6 +126,7 @@ struct vidbuffer
 extern bool isnativevidbuf(int monid);
 extern int max_uae_width, max_uae_height;
 extern bool gfx_hdr;
+extern float p96vblank;
 
 struct vidbuf_description
 {

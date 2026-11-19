@@ -36,12 +36,41 @@ using namespace std;
 #include <assert.h>
 #include <limits.h>
 
+#ifndef UAE
+#define UAE
+#endif
+
+#if defined(__aarch64__) || defined(_M_ARM64) || defined(_M_ARM64EC) 
+#define CPU_AARCH64 1
+#define CPU_arm 1
+#define ARM_ASSEMBLY 1
+#define CPU_64_BIT 1
+#elif defined(__arm__) || defined(_M_ARM)
+#define CPU_arm 1
+#define ARM_ASSEMBLY 1
+#elif defined(__x86_64__) || defined(_M_AMD64)
+#define CPU_x86_64 1
+#define CPU_64_BIT 1
+#define X86_64_ASSEMBLY 1
+#elif defined(__i386__) || defined(_M_IX86)
+#define CPU_i386 1
+#define X86_ASSEMBLY 1
+#define SAHF_SETO_PROFITABLE
+#elif defined(__powerpc__) || defined(_M_PPC)
+#define CPU_powerpc 1
+#else
+#error unrecognized CPU type
+#endif
+
 #ifdef _WIN32
 /* Parameters are passed in ECX, EDX for both x86 and x86-64 (RCX, RDX).
  * For x86-64, __fastcall is the default, so it isn't really required. */
 #define JITCALL __fastcall
 #elif defined(CPU_x86_64)
 /* Parameters are passed in RDI, RSI by default (System V AMD64 ABI). */
+#define JITCALL
+#elif defined(CPU_arm) || defined(CPU_AARCH64)
+/* ARM/ARM64: parameters are passed in registers by default. */
 #define JITCALL
 #elif defined(HAVE_FUNC_ATTRIBUTE_REGPARM)
 /* Parameters are passed in EAX, EDX on x86 with regparm(2). */
@@ -496,9 +525,32 @@ extern void mallocemu_free (void *ptr);
 #include "machdep/machdep.h"
 #endif
 
+#ifdef __LIBRETRO__
 #define error_log     write_log
 #define uae_log       write_log
 #define write_dlog    write_log
+#endif
+/* Console prototypes. libretro has no interactive console; these are
+   implemented as stubs by retrodep/misc.c */
+extern void flush_log (void);
+extern TCHAR *setconsolemode (TCHAR *buffer, int maxlen);
+extern void close_console (void);
+extern void open_console(void);
+extern void reopen_console(void);
+extern void activate_console (void);
+extern void deactivate_console(void);
+extern bool is_interactive_console(void);
+extern void set_console_input_mode(int);
+extern void console_out (const TCHAR *);
+extern void console_out_f (const TCHAR *, ...);
+extern void console_flush (void);
+extern int console_get (TCHAR *, int);
+extern bool console_isch (void);
+extern TCHAR console_getch (void);
+extern void f_out (void *, const TCHAR *, ...);
+extern TCHAR* buf_out (TCHAR *buffer, int *bufsize, const TCHAR *format, ...);
+extern void gui_message (const TCHAR *,...);
+extern int gui_message_multibutton (int flags, const TCHAR *format,...);
 #define write_log_err write_log
 #define console_out   write_log
 #define console_out_f
@@ -516,6 +568,7 @@ extern void logging_init (void);
 extern FILE *log_open (const TCHAR *name, int append, int bootlog, TCHAR*);
 extern void log_close (FILE *f);
 extern TCHAR *write_log_get_ts(void);
+extern int log_nodatestamps;
 extern bool is_console_open(void);
 extern void activate_console (void);
 extern void open_console(void);
@@ -746,15 +799,7 @@ typedef int64_t off64_t;
 typedef uint32_t uint32;
 typedef uint8_t uint8;
 
-typedef uint64_t UINT64;
-typedef uint32_t UINT32;
-typedef uint16_t UINT16;
-typedef uint8_t UINT8;
-
-typedef int64_t INT64;
-typedef int32_t INT32;
-typedef int16_t INT16;
-typedef int8_t INT8;
+/* INT8..UINT64 come from uae/types.h */
 
 #include "misc.h"
 

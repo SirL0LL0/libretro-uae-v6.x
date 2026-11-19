@@ -9,12 +9,9 @@
 #include "sysconfig.h"
 #include "sysdeps.h"
 
-#ifndef __LIBRETRO__
-#ifdef _WIN32
-#include <windows.h>
-#include "win32.h"
-#endif
-#endif
+#ifdef WITH_ARCHIVES
+
+#include "uae/dlopen.h"
 
 #include "options.h"
 #include "zfile.h"
@@ -526,6 +523,7 @@ static struct zfile *archive_unpack_zip (struct zfile *zf)
 
 #include "7z/7z.h"
 #include "7z/Alloc.h"
+#include "7z/7zBuf.h"
 #include "7z/7zFile.h"
 #include "7z/7zVersion.h"
 #include "7z/7zCrc.h"
@@ -542,18 +540,24 @@ static void SzFree(void *p, void *address)
 static ISzAlloc allocImp;
 static ISzAlloc allocTempImp;
 
+struct ZFileInStream
+{
+	ISeekInStream s;
+	struct zfile *file;
+};
+
 static SRes SzFileReadImp (void *object, void *buffer, size_t *size)
 {
-	CFileInStream *s = (CFileInStream *)object;
-	struct zfile *zf = (struct zfile*)s->file.myhandle;
+	ZFileInStream *s = (ZFileInStream *)object;
+	struct zfile *zf = s->file;
 	*size = zfile_fread (buffer, 1, *size, zf);
 	return SZ_OK;
 }
 
 static SRes SzFileSeekImp(void *object, Int64 *pos, ESzSeek origin)
 {
-	CFileInStream *s = (CFileInStream *)object;
-	struct zfile *zf = (struct zfile*)s->file.myhandle;
+	ZFileInStream *s = (ZFileInStream *)object;
+	struct zfile *zf = s->file;
 	int org = 0;
 	switch (origin)
 	{
@@ -581,10 +585,55 @@ static void init_7z (void)
 	_tzset ();
 }
 
+#ifdef UAE_7Z_SDK_1604
+static TCHAR *sevenzip_get_name(const CSzArEx *db, UInt32 index)
+{
+	size_t len = SzArEx_GetFileNameUtf16(db, index, NULL);
+	UInt16 *src = xcalloc(UInt16, len > 0 ? len : 1);
+	TCHAR *out;
+
+	SzArEx_GetFileNameUtf16(db, index, src);
+#if defined(UNICODE) || defined(_UNICODE)
+	out = xmalloc(TCHAR, len > 0 ? len : 1);
+	for (size_t i = 0; i < len; i++)
+		out[i] = (TCHAR)src[i];
+	if (!len)
+		out[0] = 0;
+#else
+	out = xmalloc(TCHAR, len * 4 + 1);
+	size_t o = 0;
+	for (size_t i = 0; i < len && src[i]; i++) {
+		uae_u32 c = src[i];
+		if (c >= 0xd800 && c <= 0xdbff && i + 1 < len && src[i + 1] >= 0xdc00 && src[i + 1] <= 0xdfff) {
+			c = 0x10000 + ((c - 0xd800) << 10) + (src[++i] - 0xdc00);
+		}
+		if (c < 0x80) {
+			out[o++] = (TCHAR)c;
+		} else if (c < 0x800) {
+			out[o++] = (TCHAR)(0xc0 | (c >> 6));
+			out[o++] = (TCHAR)(0x80 | (c & 0x3f));
+		} else if (c < 0x10000) {
+			out[o++] = (TCHAR)(0xe0 | (c >> 12));
+			out[o++] = (TCHAR)(0x80 | ((c >> 6) & 0x3f));
+			out[o++] = (TCHAR)(0x80 | (c & 0x3f));
+		} else {
+			out[o++] = (TCHAR)(0xf0 | (c >> 18));
+			out[o++] = (TCHAR)(0x80 | ((c >> 12) & 0x3f));
+			out[o++] = (TCHAR)(0x80 | ((c >> 6) & 0x3f));
+			out[o++] = (TCHAR)(0x80 | (c & 0x3f));
+		}
+	}
+	out[o] = 0;
+#endif
+	xfree(src);
+	return out;
+}
+#endif
+
 struct SevenZContext
 {
 	CSzArEx db;
-	CFileInStream archiveStream;
+	ZFileInStream archiveStream;
 	CLookToRead lookStream;
 	Byte *outBuffer;
 	size_t outBufferSize;
@@ -614,7 +663,7 @@ struct zvolume *archive_directory_7z (struct zfile *z)
 	ctx->blockIndex = 0xffffffff;
 	ctx->archiveStream.s.Read = SzFileReadImp;
 	ctx->archiveStream.s.Seek = SzFileSeekImp;
-	ctx->archiveStream.file.myhandle = (void*)z;
+	ctx->archiveStream.file = z;
 	LookToRead_CreateVTable (&ctx->lookStream, False);
 	ctx->lookStream.realStream = &ctx->archiveStream.s;
 	LookToRead_Init (&ctx->lookStream);
@@ -627,6 +676,33 @@ struct zvolume *archive_directory_7z (struct zfile *z)
 		return NULL;
 	}
 	zv = zvolume_alloc (z, ArchiveFormat7Zip, ctx, NULL);
+#ifdef UAE_7Z_SDK_1604
+	for (i = 0; i < ctx->db.NumFiles; i++) {
+		TCHAR *name = sevenzip_get_name(&ctx->db, i);
+		struct zarchive_info zai;
+
+		memset(&zai, 0, sizeof zai);
+		zai.name = name;
+		zai.flags = SzBitWithVals_Check(&ctx->db.Attribs, i) ? ctx->db.Attribs.Vals[i] : -1;
+		zai.size = SzArEx_GetFileSize(&ctx->db, i);
+		if (SzBitWithVals_Check(&ctx->db.MTime, i)) {
+			CNtfsFileTime *mt = ctx->db.MTime.Vals + i;
+			uae_u64 t = (((uae_u64)mt->High) << 32) | mt->Low;
+			if (t >= EPOCH_DIFF) {
+				zai.tv.tv_sec = (t - EPOCH_DIFF) / RATE_DIFF;
+				zai.tv.tv_sec -= _timezone;
+				if (_daylight)
+					zai.tv.tv_sec += 1 * 60 * 60;
+			}
+		}
+		if (!SzArEx_IsDir(&ctx->db, i)) {
+			struct znode *zn = zvolume_addfile_abs (zv, &zai);
+			if (zn)
+				zn->offset = i;
+		}
+		xfree(name);
+	}
+#else
 	for (i = 0; i < ctx->db.db.NumFiles; i++) {
 		CSzFileItem *f = ctx->db.db.Files + i;
 		TCHAR *name = (TCHAR*)(ctx->db.FileNames.data + ctx->db.FileNameOffsets[i] * 2);
@@ -651,6 +727,7 @@ struct zvolume *archive_directory_7z (struct zfile *z)
 				zn->offset = i;
 		}
 	}
+#endif
 	zv->method = ArchiveFormat7Zip;
 	return zv;
 }
@@ -689,15 +766,15 @@ static struct zfile *archive_access_7z (struct znode *zn)
 /* copy and paste job? you are only imagining it! */
 static struct zfile *rarunpackzf; /* stupid unrar.dll */
 #include <unrar.h>
-typedef HANDLE (_stdcall* RAROPENARCHIVEEX)(struct RAROpenArchiveDataEx*);
+typedef void *(_stdcall* RAROPENARCHIVEEX)(struct RAROpenArchiveDataEx*);
 static RAROPENARCHIVEEX pRAROpenArchiveEx;
-typedef int (_stdcall* RARREADHEADEREX)(HANDLE,struct RARHeaderDataEx*);
+typedef int (_stdcall* RARREADHEADEREX)(void *,struct RARHeaderDataEx*);
 static RARREADHEADEREX pRARReadHeaderEx;
-typedef int (_stdcall* RARPROCESSFILE)(HANDLE,int,char*,char*);
+typedef int (_stdcall* RARPROCESSFILE)(void *,int,char*,char*);
 static RARPROCESSFILE pRARProcessFile;
-typedef int (_stdcall* RARCLOSEARCHIVE)(HANDLE);
+typedef int (_stdcall* RARCLOSEARCHIVE)(void *);
 static RARCLOSEARCHIVE pRARCloseArchive;
-typedef void (_stdcall* RARSETCALLBACK)(HANDLE,UNRARCALLBACK,LONG);
+typedef void (_stdcall* RARSETCALLBACK)(void *,UNRARCALLBACK,LONG);
 static RARSETCALLBACK pRARSetCallback;
 typedef int (_stdcall* RARGETDLLVERSION)(void);
 static RARGETDLLVERSION pRARGetDllVersion;
@@ -708,21 +785,21 @@ static int canrar (void)
 
 	if (israr == 0) {
 		israr = -1;
-#ifdef _WIN32
+#ifdef TARGET_HAS_ARCHIVE_PLUGINS
 		{
-			HMODULE rarlib;
+			UAE_DLHANDLE rarlib;
 
-			rarlib = WIN32_LoadLibrary (_T("unrar.dll"));
+			rarlib = uae_dlopen_plugin(_T("unrar"));
 			if (rarlib) {
 				TCHAR tmp[MAX_DPATH];
 				tmp[0] = 0;
-				GetModuleFileName (rarlib, tmp, sizeof tmp / sizeof (TCHAR));
-				pRAROpenArchiveEx = (RAROPENARCHIVEEX)GetProcAddress (rarlib, "RAROpenArchiveEx");
-				pRARReadHeaderEx = (RARREADHEADEREX)GetProcAddress (rarlib, "RARReadHeaderEx");
-				pRARProcessFile = (RARPROCESSFILE)GetProcAddress (rarlib, "RARProcessFile");
-				pRARCloseArchive = (RARCLOSEARCHIVE)GetProcAddress (rarlib, "RARCloseArchive");
-				pRARSetCallback = (RARSETCALLBACK)GetProcAddress (rarlib, "RARSetCallback");
-				pRARGetDllVersion = (RARGETDLLVERSION)GetProcAddress (rarlib, "RARGetDllVersion");
+				uae_dlpath(rarlib, tmp, sizeof tmp / sizeof(TCHAR));
+				pRAROpenArchiveEx = (RAROPENARCHIVEEX)uae_dlsym (rarlib, "RAROpenArchiveEx");
+				pRARReadHeaderEx = (RARREADHEADEREX)uae_dlsym (rarlib, "RARReadHeaderEx");
+				pRARProcessFile = (RARPROCESSFILE)uae_dlsym (rarlib, "RARProcessFile");
+				pRARCloseArchive = (RARCLOSEARCHIVE)uae_dlsym (rarlib, "RARCloseArchive");
+				pRARSetCallback = (RARSETCALLBACK)uae_dlsym (rarlib, "RARSetCallback");
+				pRARGetDllVersion = (RARGETDLLVERSION)uae_dlsym (rarlib, "RARGetDllVersion");
 				if (pRAROpenArchiveEx && pRARReadHeaderEx && pRARProcessFile && pRARCloseArchive && pRARSetCallback) {
 					int version = -1;
 					israr = 1;
@@ -755,7 +832,7 @@ struct RARContext
 {
 	struct RAROpenArchiveDataEx OpenArchiveData;
 	struct RARHeaderDataEx HeaderData;
-	HANDLE hArcData;
+	void *hArcData;
 };
 
 static void archive_close_rar (void *ctx)
@@ -881,13 +958,13 @@ static aapGetFileInfo aaGetFileInfo;
 static aapExtract aaExtract;
 static aapCloseArchive aaCloseArchive;
 
-#ifdef _WIN32
-static HMODULE arcacc_mod;
+#ifdef TARGET_HAS_ARCHIVE_PLUGINS
+static UAE_DLHANDLE arcacc_mod;
 
 static void arcacc_free (void)
 {
 	if (arcacc_mod)
-		FreeLibrary (arcacc_mod);
+		uae_dlclose (arcacc_mod);
 	arcacc_mod = NULL;
 }
 
@@ -895,16 +972,16 @@ static int arcacc_init (struct zfile *zf)
 {
 	if (arcacc_mod)
 		return 1;
-	arcacc_mod = WIN32_LoadLibrary (_T("archiveaccess.dll"));
+	arcacc_mod = uae_dlopen_plugin(_T("archiveaccess"));
 	if (!arcacc_mod) {
 		write_log (_T("failed to open archiveaccess.dll ('%s')\n"), zfile_getname (zf));
 		return 0;
 	}
-	aaOpenArchive = (aapOpenArchive) GetProcAddress (arcacc_mod, "aaOpenArchive");
-	aaGetFileCount = (aapGetFileCount) GetProcAddress (arcacc_mod, "aaGetFileCount");
-	aaGetFileInfo = (aapGetFileInfo) GetProcAddress (arcacc_mod, "aaGetFileInfo");
-	aaExtract = (aapExtract) GetProcAddress (arcacc_mod, "aaExtract");
-	aaCloseArchive = (aapCloseArchive) GetProcAddress (arcacc_mod, "aaCloseArchive");
+	aaOpenArchive = (aapOpenArchive) uae_dlsym (arcacc_mod, "aaOpenArchive");
+	aaGetFileCount = (aapGetFileCount) uae_dlsym (arcacc_mod, "aaGetFileCount");
+	aaGetFileInfo = (aapGetFileInfo) uae_dlsym (arcacc_mod, "aaGetFileInfo");
+	aaExtract = (aapExtract) uae_dlsym (arcacc_mod, "aaExtract");
+	aaCloseArchive = (aapCloseArchive) uae_dlsym (arcacc_mod, "aaCloseArchive");
 	if (!aaOpenArchive || !aaGetFileCount || !aaGetFileInfo || !aaExtract || !aaCloseArchive) {
 		write_log (_T("Missing functions in archiveaccess.dll. Old version?\n"));
 		arcacc_free ();
@@ -2220,3 +2297,38 @@ struct zfile *archive_getzfile (struct znode *zn, unsigned int id, int flags)
 	}
 	return zf;
 }
+
+#else // WITH_ARCHIVES
+
+#include "zfile.h"
+#include "zarchive.h"
+
+struct zvolume *archive_directory_plain(struct zfile *) { return NULL; }
+struct zvolume *archive_directory_lha(struct zfile *) { return NULL; }
+struct zvolume *archive_directory_zip(struct zfile *) { return NULL; }
+struct zvolume *archive_directory_7z(struct zfile *) { return NULL; }
+struct zfile *archive_access_7z(struct znode *) { return NULL; }
+struct zvolume *archive_directory_rar(struct zfile *) { return NULL; }
+struct zfile *archive_access_rar(struct znode *) { return NULL; }
+struct zvolume *archive_directory_lzx(struct zfile *) { return NULL; }
+struct zfile *archive_access_lzx(struct znode *) { return NULL; }
+struct zvolume *archive_directory_arcacc(struct zfile *, unsigned int) { return NULL; }
+struct zvolume *archive_directory_adf(struct znode *, struct zfile *) { return NULL; }
+struct zvolume *archive_directory_rdb(struct zfile *) { return NULL; }
+struct zvolume *archive_directory_fat(struct zfile *) { return NULL; }
+struct zvolume *archive_directory_tar(struct zfile *) { return NULL; }
+struct zfile *archive_access_select(struct znode *, struct zfile *, unsigned int, int, int *retcode, int)
+{
+	if (retcode) {
+		*retcode = 0;
+	}
+	return NULL;
+}
+void archive_access_scan(struct zfile *, zfile_callback, void *, unsigned int) {}
+void archive_access_close(void *, unsigned int) {}
+struct zfile *archive_unpackzfile(struct zfile *zf) { return zf; }
+struct zfile *archive_access_lha(struct znode *) { return NULL; }
+struct zfile *archive_getzfile(struct znode *, unsigned int, int) { return NULL; }
+int isfat(uae_u8 *) { return 0; }
+
+#endif // WITH_ARCHIVES

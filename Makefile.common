@@ -111,6 +111,13 @@ SOURCES_C += \
 	$(EMU)/inputdevice.c \
 	$(EMU)/isofs.c \
 	$(EMU)/keybuf.c \
+	$(EMU)/kbmcu/keyboard_mcu_6500_1.c \
+	$(EMU)/kbmcu/keyboard_mcu_6805.c \
+	$(EMU)/kbmcu/keyboard_mcu_d8039hlc.c \
+	$(EMU)/kbmcu/8048/co8048.c \
+	$(EMU)/kbmcu/m6805/m68emu.c \
+	$(EMU)/kbmcu/m6805/m68_ops.c \
+	$(EMU)/mos6502.c \
 	$(EMU)/main.c \
 	$(EMU)/memory.c \
 	$(EMU)/misc.c \
@@ -118,6 +125,9 @@ SOURCES_C += \
 	$(EMU)/native2amiga.c \
 	$(EMU)/ncr_scsi.c \
 	$(EMU)/ncr9x_scsi.c \
+	$(EMU)/qemuvga/esp.c \
+	$(EMU)/qemuvga/lsi53c710.c \
+	$(EMU)/qemuvga/lsi53c895a.c \
 	$(EMU)/newcpu.c \
 	$(EMU)/newcpu_common.c \
 	$(EMU)/pci.c \

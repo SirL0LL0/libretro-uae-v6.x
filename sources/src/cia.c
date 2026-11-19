@@ -19,34 +19,44 @@
 #include "custom.h"
 #include "newcpu.h"
 #include "cia.h"
+#ifdef WITH_X86
+#include "atonce.h"
+#endif
 #ifdef SERIAL_PORT
 #include "serial.h"
 #endif
 #include "disk.h"
-#include "xwin.h"
 #include "keybuf.h"
 #include "gui.h"
 #include "savestate.h"
 #include "inputdevice.h"
 #include "zfile.h"
 #include "ar.h"
+#ifdef PARALLEL_PORT
 #include "parallel.h"
+#endif
 #include "akiko.h"
 #include "cdtv.h"
 #include "debug.h"
+#ifdef ARCADIA
 #include "arcadia.h"
+#endif
 #include "audio.h"
 #include "keyboard.h"
-#include "uae.h"
+#ifdef AMAX
 #include "amax.h"
+#endif
 #include "sampler.h"
 #include "dongle.h"
 #include "inputrecord.h"
+#ifdef WITH_PPC
 #include "uae/ppc.h"
+#endif
 #include "rommgr.h"
 #include "scsi.h"
 #include "rtc.h"
 #include "devices.h"
+#include "keyboard_mcu.h"
 
 #define CIAA_DEBUG_R 0
 #define CIAA_DEBUG_W 0
@@ -129,6 +139,7 @@ struct CIATimer
 	uae_u32 loaddelay;
 	uae_u8 preovfl;
 	uae_u8 cr;
+	uae_u32 timerval_prev;
 };
 
 struct CIA
@@ -174,6 +185,10 @@ static struct rtc_ricoh_data rtc_ricoh;
 static int internaleclockphase;
 static bool cia_cycle_accurate;
 
+int cia_timer_hack_adjust = 1;
+
+static void check_keyboard(void);
+
 static bool acc_mode(void)
 {
 	return cia_cycle_accurate;
@@ -215,11 +230,11 @@ void cia_set_eclockphase(void)
 static evt_t get_e_cycles(void)
 {
 	// temporary e-clock phase shortcut
-	if (blop) {
+	if (0 && blop) {
 		cia_adjust_eclock_phase(1);
 		blop = 0;
 	}
-	if (blop2) {
+	if (0 && blop2) {
 		if (currprefs.cs_eclocksync == 0) {
 			currprefs.cs_eclocksync = 1;
 		}
@@ -294,7 +309,7 @@ static void RethinkICR(int num)
 			c->icr1 |= 0x80 | 0x40;
 #ifdef DEBUGGER
 			if (debug_dma) {
-				record_dma_event(num ? DMA_EVENT_CIAB_IRQ : DMA_EVENT_CIAA_IRQ, current_hpos(), vpos);
+				record_dma_event(num ? DMA_EVENT_CIAB_IRQ : DMA_EVENT_CIAA_IRQ);
 			}
 #endif
 			ICR(num);
@@ -394,6 +409,7 @@ static void compute_passed_time(void)
 static void timer_reset(struct CIATimer *t)
 {
 	t->timer = t->latch;
+	t->timerval_prev = 0xffffffff;
 	if (acc_mode()) {
 		if (t->cr & CR_RUNMODE) {
 			t->inputpipe &= ~CIA_PIPE_CLR1;
@@ -520,6 +536,7 @@ static void CIA_update_check(void)
 				if (t->loaddelay & 0x00000001) {
 					t->timer = t->latch;
 					t->inputpipe &= ~CIA_PIPE_CLR1;
+					t->timerval_prev = 0xffffffff;
 				}
 
 				// timer=0 special cases. TODO: better way to do this..
@@ -553,6 +570,7 @@ static void CIA_update_check(void)
 			c->t[0].timer -= cc;
 			c->t[0].timer &= 0xffff;
 			if (c->t[0].timer == 0) {
+				c->t[0].timerval_prev = 0xffffffff;
 				// SP in output mode (data sent can be ignored if CIA-A)
 				if ((c->t[0].cr & (CR_SPMODE | CR_RUNMODE)) == CR_SPMODE && c->sdr_cnt > 0) {
 					c->sdr_cnt--;
@@ -581,11 +599,13 @@ static void CIA_update_check(void)
 		if (cc > 0) {
 			if ((c->t[1].timer == 0 && (c->t[1].cr & (CR_INMODE | CR_INMODE1)))) {
 				ovfl[1] = 2;
+				c->t[1].timerval_prev = 0xffffffff;
 			} else {
 				c->t[1].timer -= cc;
 				c->t[1].timer &= 0xffff;
 				if ((c->t[1].timer == 0 && !(c->t[1].cr & (CR_INMODE | CR_INMODE1)))) {
 					ovfl[1] = 2;
+					c->t[1].timerval_prev = 0xffffffff;
 				}
 			}
 		}
@@ -606,6 +626,7 @@ static void CIA_update_check(void)
 						icr |= 1 << num;
 					}
 					t->timer = t->latch;
+					t->timerval_prev = 0xffffffff;
 				}
 				if (!loaded[tn]) {
 					if (t->cr & CR_RUNMODE) {
@@ -621,9 +642,9 @@ static void CIA_update_check(void)
 							t->inputpipe &= ~CIA_PIPE_CLR2;
 						}
 					} else {
-						if (acc_mode()) {
-							t->inputpipe &= ~CIA_PIPE_CLR1;
-						}
+						// Continuous mode: the reload takes one clock, so the
+						// period is latch + 1 (also in the non-accurate mode).
+						t->inputpipe &= ~CIA_PIPE_CLR1;
 					}
 				}
 				t->preovfl = false;
@@ -963,18 +984,57 @@ static void setcode(uae_u8 keycode)
 	kbcode = ~((keycode << 1) | (keycode >> 7));
 }
 
+static int keyboard_cia_num(void)
+{
+	return currprefs.cs_compatible == CP_VELVET ? 1 : 0;
+}
+
+static void keyboard_handshake_write(struct CIA *c, uae_u8 val)
+{
+	// keyboard handshake handling
+	bool handshake_start = (val & CR_INMODE1) != 0 && (c->t[0].cr & CR_INMODE1) == 0;
+	bool handshake_end = (val & CR_INMODE1) == 0 && (c->t[0].cr & CR_INMODE1) != 0;
+
+	if (currprefs.cpuboard_type != 0 && (handshake_start || handshake_end)) {
+		/* bleh, Phase5 CPU timed early boot key check fix.. */
+		if (m68k_getpc() >= 0xf00000 && m68k_getpc() < 0xf80000)
+			check_keyboard();
+	}
+	if (handshake_start) {
+		if (kblostsynccnt > 0 && currprefs.cs_kbhandshake) {
+			kbhandshakestart = get_cycles();
+		}
+#if KB_DEBUG
+		write_log(_T("KB_ACK_START %02x->%02x %08x\n"), c->t[0].cr, val, M68K_GETPC);
+#endif
+	} else if (handshake_end) {
+		/* todo: check if low to high or high to low only */
+		if (kblostsynccnt > 0 && currprefs.cs_kbhandshake) {
+			evt_t len = get_cycles() - kbhandshakestart;
+			if (len < currprefs.cs_kbhandshake * CYCLE_UNIT) {
+				write_log(_T("Keyboard handshake pulse length %d < %d (CCKs)\n"), len / CYCLE_UNIT, currprefs.cs_kbhandshake);
+			}
+		}
+		kblostsynccnt = 0;
+#if KB_DEBUG
+		write_log(_T("KB_ACK_END %02x->%02x %08x\n"), c->t[0].cr, val, M68K_GETPC);
+#endif
+	}
+}
+
 static void sendrw(void)
 {
+	int num = keyboard_cia_num();
 	setcode(AK_RESETWARNING);
-	cia[0].sdr = kbcode;
+	cia[num].sdr = kbcode;
 	kblostsynccnt = 8 * maxvpos * 8; // 8 frames * 8 bits.
-	CIA_sync_interrupt(0, ICR_SP);
+	CIA_sync_interrupt(num, ICR_SP);
 	write_log(_T("KB: sent reset warning code (phase=%d)\n"), resetwarning_phase);
 }
 
 int resetwarning_do(int canreset)
 {
-	if (!currprefs.keyboard_connected)
+	if (currprefs.keyboard_mode < 0)
 		return 0;
 	if (resetwarning_phase || regs.halted > 0) {
 		/* just force reset if second reset happens during resetwarning */
@@ -993,6 +1053,8 @@ int resetwarning_do(int canreset)
 
 static void resetwarning_check(void)
 {
+	int num = keyboard_cia_num();
+
 	if (resetwarning_timer > 0) {
 		resetwarning_timer--;
 		if (resetwarning_timer <= 0) {
@@ -1010,14 +1072,14 @@ static void resetwarning_check(void)
 			sendrw();
 		}
 	} else if (resetwarning_phase == 2) {
-		if (cia[0].t[0].cr & CR_SPMODE) { /* second AK_RESETWARNING handshake active */
+		if (cia[num].t[0].cr & CR_SPMODE) { /* second AK_RESETWARNING handshake active */
 			resetwarning_phase = 3;
 			write_log(_T("KB: reset warning SP = output\n"));
 			/* System won't reset until handshake signal becomes inactive or 10s has passed */
 			resetwarning_timer = (int)(10 * maxvpos_nom * vblank_hz);
 		}
 	} else if (resetwarning_phase == 3) {
-		if (!(cia[0].t[0].cr & CR_SPMODE)) { /* second AK_RESETWARNING handshake disabled */
+		if (!(cia[num].t[0].cr & CR_SPMODE)) { /* second AK_RESETWARNING handshake disabled */
 			write_log(_T("KB: reset warning end by software. reset.\n"));
 			resetwarning_phase = -1;
 			kblostsynccnt = 0;
@@ -1026,18 +1088,19 @@ static void resetwarning_check(void)
 	}
 }
 
-void CIA_hsync_prehandler (void)
+void cia_keyreq(uae_u8 code)
 {
-}
+	int num = keyboard_cia_num();
 
-static void keyreq (void)
-{
 #if KB_DEBUG
 	write_log(_T("code=%02x (%02x)\n"), kbcode, (uae_u8)(~((kbcode >> 1) | (kbcode << 7))));
 #endif
-	cia[0].sdr = kbcode;
-	kblostsynccnt = 8 * maxvpos * 8; // 8 frames * 8 bits.
-	CIA_sync_interrupt(0, ICR_SP);
+
+	cia[num].sdr = code;
+	if (currprefs.keyboard_mode == 0) {
+		kblostsynccnt = 8 * maxvpos * 8; // 8 frames * 8 bits.
+	}
+	CIA_sync_interrupt(num, ICR_SP);
 }
 
 /* All this complexity to lazy evaluate CIA-B TOD increase.
@@ -1088,7 +1151,9 @@ static void CIA_tod_event_check(int num)
 	if (c->tod_event_state == 1) {
 		int hpos = current_hpos();
 		if (hpos >= c->tod_offset) {
-			CIA_tod_inc(false, num);
+			// irq: the alarm or TOD may have been written after
+			// CIA_tod_handler() predicted no alarm on this tick.
+			CIA_tod_inc(true, num);
 			c->tod_event_state = 0;
 		}
 	}
@@ -1156,6 +1221,11 @@ void keyboard_connected(bool connect)
 {
 	if (connect) {
 		write_log(_T("Keyboard connected\n"));
+		if (currprefs.keyboard_mode > 0) {
+			keymcu_reset();
+			keymcu2_reset();
+			keymcu3_reset();
+		}
 	} else {
 		write_log(_T("Keyboard disconnected\n"));
 	}
@@ -1164,9 +1234,53 @@ void keyboard_connected(bool connect)
 	resetwarning_phase = 0;
 }
 
+static bool keymcu_execute(void)
+{
+	bool handshake = (cia[0].t[0].cr & 0x40) != 0 && (cia[0].sdr_buf & 0x80) == 0;
+
+#if 0
+	extern int blop;
+	if (blop & 1) {
+		handshake = true;
+	}
+#endif
+
+	bool cyclemode = false;
+	if (currprefs.keyboard_mode == KB_A500_6570 ||
+		currprefs.keyboard_mode == KB_A600_6570 ||
+		currprefs.keyboard_mode == KB_A1000_6570 ||
+		currprefs.keyboard_mode == KB_Ax000_6570)
+	{
+		cyclemode = keymcu_run(handshake);
+	}
+	if (currprefs.keyboard_mode == KB_A1200_6805) {
+		cyclemode = keymcu2_run(handshake);
+	}
+	if (currprefs.keyboard_mode == KB_A2000_8039) {
+		cyclemode = keymcu3_run(handshake);
+	}
+	return cyclemode;
+}
+
+static void keymcu_event(uae_u32 v)
+{
+	bool cyclemode = keymcu_execute();
+	if (cyclemode) {
+		// execute few times / scanline, does not need to be accurate
+		// because keyboard MCU has separate not that accurate clock crystal.
+		event2_newevent_x_remove(keymcu_event);
+		event2_newevent_xx(-1, 27 * CYCLE_UNIT, 0, keymcu_event);
+	}
+}
+
+static void keymcu_do(void)
+{
+	keymcu_event(0);
+}
+
 static void check_keyboard(void)
 {
-	if (currprefs.keyboard_connected) {
+	if (currprefs.keyboard_mode >= 0) {
 		if ((keys_available() || kbstate < 3) && !kblostsynccnt ) {
 			switch (kbstate)
 			{
@@ -1186,7 +1300,7 @@ static void check_keyboard(void)
 					kbcode = ~get_next_key();
 					break;
 			}
-			keyreq();
+			cia_keyreq(kbcode);
 		}
 	} else {
 		while (keys_available()) {
@@ -1203,7 +1317,10 @@ static void cia_delayed_tod(int num)
 		return;
 	}
 	if (c->tod_event_state == 1) {
-		CIA_tod_inc(false, num);
+		// No alarm event was scheduled, either because none was
+		// predicted (the alarm or TOD can be written after that) or
+		// because the increment crossed into this line: still raise it.
+		CIA_tod_inc(true, num);
 	}
 	c->tod_event_state = 0;
 	c->tod_offset = -1;
@@ -1218,21 +1335,27 @@ void CIA_hsync_posthandler(bool ciahsync, bool dotod)
 		if (currprefs.tod_hack && cia[0].todon) {
 			do_tod_hack(dotod);
 		}
-	} else if (currprefs.keyboard_connected) {
-		// custom hsync
-		if (resetwarning_phase) {
-			resetwarning_check();
-			while (keys_available()) {
-				get_next_key();
-			}
-		} else {
-			if ((hsync_counter & 15) == 0) {
-				check_keyboard();
-			}
-		}
 	} else {
-		while (keys_available()) {
-			get_next_key();
+		if (currprefs.keyboard_mode > 0) {
+			keymcu_do();
+		} else {
+			if (currprefs.keyboard_mode == 0) {
+				// custom hsync
+				if (resetwarning_phase) {
+					resetwarning_check();
+					while (keys_available()) {
+						get_next_key();
+					}
+				} else {
+					if ((hsync_counter & 15) == 0) {
+						check_keyboard();
+					}
+				}
+			} else {
+				while (keys_available()) {
+					get_next_key();
+				}
+			}
 		}
 	}
 
@@ -1240,7 +1363,6 @@ void CIA_hsync_posthandler(bool ciahsync, bool dotod)
 		// Increase CIA-A TOD if delayed from previous line
 		cia_delayed_tod(0);
 	}
-
 }
 
 static void calc_led(int old_led)
@@ -1315,7 +1437,7 @@ void CIA_vsync_prehandler(void)
 		if (kblostsynccnt <= 0) {
 			kblostsynccnt = 0;
 			kbcode = 0;
-			keyreq();
+			cia_keyreq(kbcode);
 #if KB_DEBUG
 			write_log(_T("lostsync\n"));
 #endif
@@ -1337,6 +1459,11 @@ static void check_led(void)
 		led = led2;
 		led_old_brightness = -1;
 	}
+}
+
+bool get_power_led(void)
+{
+	return led;
 }
 
 static void bfe001_change(void)
@@ -1418,7 +1545,39 @@ static uae_u8 ReadCIAReg(int num, int reg)
 	case 7:
 	{
 		uae_u16 tval = t->timer - t->passed;
+		bool timer_prev = true;
+		// fast CPU timer hack: right after a (re)load a fast CPU would read
+		// the latch value unchanged, so report one less. Only while no
+		// clock has passed since the load: once one has, the real value
+		// is already latch - 1, and adjusting further would make the
+		// counter jump up again at the next CIA update (any register
+		// access), i.e. a down-counter seen counting up.
+		if ((t->cr & CR_START) && !(t->cr & CR_INMODE1) && !(t->cr & CR_INMODE)) {
+			if (t->latch == t->timer && t->passed == 0) {
+				if (currprefs.cachesize || currprefs.m68k_speed < 0) {
+					uae_u16 adj = cia_timer_hack_adjust;
+					if (adj >= tval && (tval > 1 || !(t->cr & CR_RUNMODE))) {
+						adj = tval - 1;
+					}
+					tval -= adj;
+				}
+			}
+			if ((slow_cpu_access & 1) && (reg == 4 || reg == 6) && tval == t->timerval_prev) {
+				if (currprefs.cachesize || currprefs.m68k_speed < 0) {
+					uae_u16 adj = cia_timer_hack_adjust;
+					if (adj > 0 && ((tval > 1) || !(t->cr & CR_RUNMODE))) {
+						tval -= adj;
+					}
+					set_special(SPCFLAG_CPU_SLOW);
+					timer_prev = false;
+					t->timerval_prev = 0xffffffff;
+				}
+			}
+		}
 		if (reg == 4 || reg == 6) {
+			if (timer_prev) {
+				t->timerval_prev = tval;
+			}
 			return tval & 0xff;
 		}
 		return tval >> 8;
@@ -1513,8 +1672,9 @@ static void CIA_thi_write(int num, int tnum, uae_u8 val)
 	if (!acc_mode()) {
 		// if inaccurate mode: do everything immediately
 
-		if (!(t->cr & CR_START)) {
+		if (!(t->cr & CR_START) || (t->cr & CR_RUNMODE)) {
 			t->timer = t->latch;
+			t->timerval_prev = 0xffffffff;
 		}
 
 		if (t->cr & CR_RUNMODE) {
@@ -1563,11 +1723,27 @@ static void CIA_cr_write(int num, int tnum, uae_u8 val)
 	if (!acc_mode()) {
 		// if inaccurate mode: do everything immediately
 
+		// Fast CPU timer hack. If timer is stopped, add few extra ticks to timer before stopping it.
+		if ((t->cr & CR_START) && !(val & CR_START) && !(t->cr & CR_INMODE1) && !(t->cr & CR_INMODE) && t->timer == t->latch) {
+			if (currprefs.cachesize || currprefs.m68k_speed < 0) {
+				uae_u16 adj = cia_timer_hack_adjust;
+				if (adj >= t->timer && t->timer > 1) {
+					adj = t->timer - 1;
+				}
+				if (t->timer > adj) {
+					t->timer -= adj;
+				}
+			}
+		}
+
 		if (val & CR_LOAD) {
 			val &= ~CR_LOAD;
 			t->timer = t->latch;
+			t->timerval_prev = 0xffffffff;
 		}
+
 		if (val & CR_START) {
+			t->timerval_prev = 0xffffffff;
 			if (!CIA_timer_inmode(tnum, val)) {
 				t->inputpipe = CIA_PIPE_ALL_MASK;
 				if (t->timer <= 1) {
@@ -1598,7 +1774,15 @@ static void CIA_cr_write(int num, int tnum, uae_u8 val)
 		}
 	}
 
+	// clear serial port state when switching TX<>RX
+	if (tnum == 0 && (t->cr & 0x40) != (val & 0x040)) {
+		c->sdr_cnt = 0;
+		c->sdr_load = 0;
+		c->sdr_buf = 0;
+	}
+
 	t->cr = val;
+	
 }
 
 static void WriteCIAReg(int num, int reg, uae_u8 val)
@@ -1620,10 +1804,12 @@ static void WriteCIAReg(int num, int reg, uae_u8 val)
 	switch (reg) {
 	case 4:
 	case 6:
+		t->timerval_prev = 0xffffffff;
 		t->latch = (t->latch & 0xff00) | val;
 		break;
 	case 5:
 	case 7:
+		t->timerval_prev = 0xffffffff;
 		CIA_thi_write(num, tnum, val);
 		break;
 	case 8:
@@ -1733,12 +1919,16 @@ static uae_u8 ReadCIAA(uae_u32 addr, uae_u32 *flags)
 	switch (reg) {
 	case 0:
 	{
-		*flags |= 1;
+		if (flags) {
+			*flags |= 1;
+		}
 		uae_u8 v = DISK_status_ciaa() & 0x3c;
 		v |= handle_joystick_buttons(c->pra, c->dra);
 		v |= (c->pra | (c->dra ^ 3)) & 0x03;
 		v = dongle_cia_read(0, reg, c->dra, v);
+#ifdef ARCADIA
 		v = alg_joystick_buttons(c->pra, c->dra, v);
+#endif
 
 		// 391078-01 CIA: output mode bits always return PRA contents
 		if (currprefs.cs_ciatype[0]) {
@@ -1751,7 +1941,7 @@ static uae_u8 ReadCIAA(uae_u32 addr, uae_u32 *flags)
 			write_log(_T("BFE001 R %02X %s\n"), v, debuginfo(0));
 #endif
 
-		if (inputrecord_debug & 2) {
+		if (flags && (inputrecord_debug & 2)) {
 			if (input_record > 0)
 				inprec_recorddebug_cia(v, 0, m68k_getpc ());
 			else if (input_play > 0)
@@ -1773,14 +1963,18 @@ static uae_u8 ReadCIAA(uae_u32 addr, uae_u32 *flags)
 		} else if (arcadia_bios) {
 			tmp = arcadia_parport(0, c->prb, c->drb);
 #endif
-		} else if (currprefs.win32_samplersoundcard >= 0) {
+		} else if (currprefs.host_samplersoundcard >= 0) {
 
-			tmp = sampler_getsample((c->pra & 4) ? 1 : 0);
+			if (flags) {
+				tmp = sampler_getsample((c->pra & 4) ? 1 : 0);
+			}
 #endif
 
 		} else if (parallel_port_scsi) {
 
-			tmp = parallel_port_scsi_read(0, c->prb, c->drb);
+			if (flags) {
+				tmp = parallel_port_scsi_read(0, c->prb, c->drb);
+			}
 
 		} else {
 			tmp = handle_parport_joystick (0, tmp);
@@ -1851,10 +2045,14 @@ static uae_u8 ReadCIAB(uae_u32 addr, uae_u32 *flags)
 		} else if (isprinter() < 0) {
 			uae_u8 v;
 			tmp &= ~7;
-			parallel_direct_read_status(&v);
+			if (flags) {
+				parallel_direct_read_status(&v);
+			}
 			tmp |= v & 7;
 		} else if (parallel_port_scsi) {
-			tmp = parallel_port_scsi_read(1, c->pra, c->dra);
+			if (flags) {
+				tmp = parallel_port_scsi_read(1, c->pra, c->dra);
+			}
 		} else {
 			// serial port in output mode
 			if (c->t[0].cr & 0x40) {
@@ -1947,35 +2145,42 @@ static void WriteCIAA(uae_u16 addr, uae_u8 val, uae_u32 *flags)
 #endif
 		break;
 	case 1:
+	{
 #if DONGLE_DEBUG > 0
 		if (notinrom ())
 			write_log(_T("BFE101 W %02X %s\n"), val, debuginfo(0));
 #endif
 		c->prb = val;
 		dongle_cia_write(0, reg, c->drb, val);
+#ifdef ARCADIA
 		alg_parallel_port(c->drb, val);
+#endif
 #ifdef PARALLEL_PORT
-		if (isprinter()) {
-			if (isprinter() > 0) {
+		int printermode = isprinter();
+		if (printermode) {
+			if (printermode > 0) {
 				doprinter(val);
 				cia_parallelack();
-			} else if (isprinter() < 0) {
+			} else if (printermode) {
 				parallel_direct_write_data(val, c->drb);
 				cia_parallelack();
 			}
 		}
+#else
+		int printermode = 0;
 #endif
 #ifdef ARCADIA
-		if (!isprinter() && arcadia_bios) {
+		if (!printermode && arcadia_bios) {
 			arcadia_parport(1, c->prb, c->drb);
 		}
 #endif
 #ifdef PARALLEL_PORT
-		if (!isprinter() && parallel_port_scsi) {
+		if (!printermode && parallel_port_scsi) {
 			parallel_port_scsi_write(0, c->prb, c->drb);
 		}
 #endif
-		break;
+	}
+	break;
 	case 2:
 #if DONGLE_DEBUG > 0
 		if (notinrom ())
@@ -2009,41 +2214,25 @@ static void WriteCIAA(uae_u16 addr, uae_u8 val, uae_u32 *flags)
 	case 13:
 	case 15:
 		CIA_update();
+		if (currprefs.keyboard_mode > 0 && reg == 12 && currprefs.cs_compatible != CP_VELVET) {
+			keymcu_do();
+		}
 		WriteCIAReg(0, reg, val);
 		CIA_calctimers();
 		break;
 	case 14:
-		CIA_update();
-		// keyboard handshake handling
-		if (currprefs.cpuboard_type != 0 && (val & 0x40) != (c->t[0].cr & 0x40)) {
-			/* bleh, Phase5 CPU timed early boot key check fix.. */
-			if (m68k_getpc() >= 0xf00000 && m68k_getpc() < 0xf80000)
-				check_keyboard();
-		}
-		if ((val & CR_INMODE1) != 0 && (c->t[0].cr & CR_INMODE1) == 0) {
-			// handshake start
-			if (kblostsynccnt > 0 && currprefs.cs_kbhandshake) {
-				kbhandshakestart = get_cycles();
+		{
+			CIA_update();
+			bool handshake = (val & CR_INMODE1) != (c->t[0].cr & CR_INMODE1);
+			if (currprefs.keyboard_mode == 0 && currprefs.cs_compatible != CP_VELVET) {
+				keyboard_handshake_write(c, val);
 			}
-#if KB_DEBUG
-			write_log(_T("KB_ACK_START %02x->%02x %08x\n"), c->t[0].cr, val, M68K_GETPC);
-#endif
-		} else if ((val & CR_INMODE1) == 0 && (c->t[0].cr & CR_INMODE1) != 0) {
-			// handshake end
-			/* todo: check if low to high or high to low only */
-			if (kblostsynccnt > 0 && currprefs.cs_kbhandshake) {
-				evt_t len = get_cycles() - kbhandshakestart;
-				if (len < currprefs.cs_kbhandshake * CYCLE_UNIT) {
-					write_log(_T("Keyboard handshake pulse length %d < %d (CCKs)\n"), len / CYCLE_UNIT, currprefs.cs_kbhandshake);
-				}
+			WriteCIAReg(0, reg, val);
+			CIA_calctimers();
+			if (currprefs.keyboard_mode > 0 && handshake && currprefs.cs_compatible != CP_VELVET) {
+				keymcu_do();
 			}
-			kblostsynccnt = 0;
-#if KB_DEBUG
-			write_log(_T("KB_ACK_END %02x->%02x %08x\n"), c->t[0].cr, val, M68K_GETPC);
-#endif
 		}
-		WriteCIAReg(0, reg, val);
-		CIA_calctimers();
 		break;
 	}
 }
@@ -2140,6 +2329,20 @@ static void WriteCIAB(uae_u16 addr, uae_u8 val, uae_u32 *flags)
 		dongle_cia_write(1, reg, c->prb, val);
 		c->drb = val;
 		break;
+	case 14:
+		{
+			CIA_update();
+			bool handshake = (val & CR_INMODE1) != (c->t[0].cr & CR_INMODE1);
+			if (currprefs.keyboard_mode == 0 && currprefs.cs_compatible == CP_VELVET) {
+				keyboard_handshake_write(c, val);
+			}
+			WriteCIAReg(1, reg, val);
+			CIA_calctimers();
+			if (currprefs.keyboard_mode > 0 && handshake && currprefs.cs_compatible == CP_VELVET) {
+				keymcu_do();
+			}
+		}
+		break;
 	case 4:
 	case 5:
 	case 6:
@@ -2150,9 +2353,11 @@ static void WriteCIAB(uae_u16 addr, uae_u8 val, uae_u32 *flags)
 	case 11:
 	case 12:
 	case 13:
-	case 14:
 	case 15:
 		CIA_update();
+		if (currprefs.keyboard_mode > 0 && reg == 12 && currprefs.cs_compatible == CP_VELVET) {
+			keymcu_do();
+		}
 		WriteCIAReg(1, reg, val);
 		CIA_calctimers();
 		break;
@@ -2164,7 +2369,7 @@ void cia_set_overlay(bool overlay)
 	oldovl = overlay;
 }
 
-void CIA_reset(void)
+void CIA_reset(int hardreset)
 {
 #ifdef TOD_HACK
 	tod_hack_tv = 0;
@@ -2188,6 +2393,9 @@ void CIA_reset(void)
 	if (!savestate_state) {
 		oldovl = true;
 		kbstate = 0;
+		// serial port data is not reset
+		uae_u8 sdra = cia[0].sdr;
+		uae_u8 sdrb = cia[1].sdr;
 		memset(&cia, 0, sizeof(cia));
 		cia[0].t[0].timer = 0xffff;
 		cia[0].t[1].timer = 0xffff;
@@ -2198,6 +2406,10 @@ void CIA_reset(void)
 		cia[1].t[0].latch = 0xffff;
 		cia[1].t[1].latch = 0xffff;
 		cia[1].pra = 0x8c;
+		if (!hardreset) {
+			cia[0].sdr = sdra;
+			cia[1].sdr = sdrb;
+		}
 		internaleclockphase = 0;
 		CIA_calctimers();
 		DISK_select_set(cia[1].prb);
@@ -2228,14 +2440,21 @@ void dumpcia(void)
 
 	compute_passed_time();
 
+	uae_u8 apra = ReadCIAA(0, NULL);
+	uae_u8 aprb = ReadCIAA(1, NULL);
+	uae_u8 bpra = ReadCIAB(0, NULL);
+	uae_u8 bprb = ReadCIAB(1, NULL);
+
 	console_out_f(_T("A: CRA %02x CRB %02x ICR %02x IM %02x TA %04x (%04x) TB %04x (%04x)\n"),
-		a->t[0].cr, a->t[1].cr, a->icr1, a->imask, a->t[0].timer - a->t[0].passed, a->t[0].latch, a->t[1].timer - a->t[1].passed, a->t[1].latch);
-	console_out_f(_T("   PRA %02x PRB %02x DDRA %02x DDRB %02x\n"), a->pra, a->prb, a->dra, a->drb);
+		a->t[0].cr, a->t[1].cr, a->icr1, a->imask, a->t[0].timer - a->t[0].passed,
+		a->t[0].latch, a->t[1].timer - a->t[1].passed, a->t[1].latch);
+	console_out_f(_T("   PRA %02x [%02x] PRB %02x [%02x] DDRA %02x DDRB %02x SDR %02x\n"), a->pra, apra, a->prb, aprb, a->dra, a->drb, a->sdr);
 	console_out_f(_T("   TOD %06x (%06x) ALARM %06x %c%c CYC=%016llX\n"),
 		a->tod, a->tol, a->alarm, a->tlatch ? 'L' : '-', a->todon ? '-' : 'S', get_cycles());
 	console_out_f(_T("B: CRA %02x CRB %02x ICR %02x IM %02x TA %04x (%04x) TB %04x (%04x)\n"),
-		b->t[0].cr, b->t[1].cr, b->icr1, b->imask, b->t[0].timer - b->t[0].passed, b->t[0].latch, b->t[1].timer - b->t[1].passed, b->t[1].latch);
-	console_out_f(_T("   PRA %02x PRB %02x DDRA %02x DDRB %02x\n"), b->pra, b->prb, b->dra, b->drb);
+		b->t[0].cr, b->t[1].cr, b->icr1, b->imask, b->t[0].timer - b->t[0].passed,
+		b->t[0].latch, b->t[1].timer - b->t[1].passed, b->t[1].latch);
+	console_out_f(_T("   PRA %02x [%02x] PRB %02x [%02x] DDRA %02x DDRB %02x SDR %02x\n"), b->pra, bpra, b->prb, bprb, b->dra, b->drb, b->sdr);
 	console_out_f(_T("   TOD %06x (%06x) ALARM %06x %c%c\n"),
 		b->tod, b->tol, b->alarm, b->tlatch ? 'L' : '-', b->todon ? '-' : 'S');
 }
@@ -2257,7 +2476,7 @@ static int cia_cycles(int delay, int phase, int val, int post)
 	if (currprefs.cpu_memory_cycle_exact && debug_dma) {
 		while (delay > 0) {
 			int hpos = current_hpos();
-			record_cia_access(0xfffff, 0, 0, 0, hpos, vpos, phase + 1);
+			record_cia_access(0xfffff, 0, 0, 0, phase + 1);
 			phase += 2;
 			if (post) {
 				x_do_cycles_post(CYCLE_UNIT, val);
@@ -2319,7 +2538,7 @@ static void cia_wait_post(int cianummask, uaecptr addr, uae_u32 value, bool rw)
 	if (currprefs.cpu_memory_cycle_exact && debug_dma) {
 		int r = (addr & 0xf00) >> 8;
 		int hpos = current_hpos();
-		record_cia_access(r, cianummask, value, rw, hpos, vpos, -1);
+		record_cia_access(r, cianummask, value, rw, -1);
 	}
 #endif
 
@@ -2443,6 +2662,16 @@ static uae_u32 REGPARAM2 cia_bget(uaecptr addr)
 	uae_u8 v = 0;
 	uae_u32 flags = 0;
 
+#ifdef WITH_X86
+	// ATonce sits in the 68000 socket: it decodes before Gary
+	{
+		uae_u32 av;
+		if (atonce_cia_access(addr, &av, 1, 0)) {
+			return (uae_u8)av;
+		}
+	}
+#endif
+
 	if (isgarynocia(addr))
 		return dummy_get(addr, 1, false, 0);
 
@@ -2506,6 +2735,15 @@ static uae_u32 REGPARAM2 cia_wget(uaecptr addr)
 	int r = (addr & 0xf00) >> 8;
 	uae_u16 v = 0;
 	uae_u32 flags = 0;
+
+#ifdef WITH_X86
+	{
+		uae_u32 av;
+		if (atonce_cia_access(addr, &av, 2, 0)) {
+			return (uae_u16)av;
+		}
+	}
+#endif
 
 	if (isgarynocia(addr))
 		return dummy_get(addr, 2, false, 0);
@@ -2606,6 +2844,14 @@ static void REGPARAM2 cia_bput(uaecptr addr, uae_u32 value)
 	if (cia_debug(addr, value, sz_byte))
 		return;
 
+#ifdef WITH_X86
+	{
+		uae_u32 av = value;
+		if (atonce_cia_access(addr, &av, 1, 1))
+			return;
+	}
+#endif
+
 	if (isgarynocia(addr)) {
 		dummy_put(addr, 1, false);
 		return;
@@ -2648,6 +2894,14 @@ static void REGPARAM2 cia_wput(uaecptr addr, uae_u32 v)
 
 	if (cia_debug(addr, v, sz_word))
 		return;
+
+#ifdef WITH_X86
+	{
+		uae_u32 av = v;
+		if (atonce_cia_access(addr, &av, 2, 1))
+			return;
+	}
+#endif
 
 	if (isgarynocia(addr)) {
 		dummy_put(addr, 2, false);

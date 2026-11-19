@@ -1514,7 +1514,7 @@ int process_keyboard_pass_through()
             fire1_button = -1;
          if (mapper_keys[fire2_button] || (retro_turbo_fire && fire2_button == turbo_fire_button))
             fire2_button = -1;
-         if (mapper_keys[jump_button] || (retro_turbo_fire && jump_button == turbo_fire_button))
+         if (jump_button > -1 && (mapper_keys[jump_button] || (retro_turbo_fire && jump_button == turbo_fire_button)))
             jump_button  = -1;
       }
    }
@@ -1641,7 +1641,7 @@ int process_keyboard_pass_through()
             fire1_button = -1;
          if (mapper_keys[fire2_button] || (retro_turbo_fire && fire2_button == turbo_fire_button))
             fire2_button = -1;
-         if (mapper_keys[jump_button] || (retro_turbo_fire && jump_button == turbo_fire_button))
+         if (jump_button > -1 && (mapper_keys[jump_button] || (retro_turbo_fire && jump_button == turbo_fire_button)))
             jump_button  = -1;
       }
    }

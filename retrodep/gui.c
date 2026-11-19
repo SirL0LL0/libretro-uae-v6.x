@@ -18,7 +18,7 @@ void gui_disk_image_change (int unitnum, const TCHAR *name, bool writeprotected)
 {
 }
 
-bool gui_ask_disk(int drv, TCHAR *name)
+bool gui_ask_disk(int drv, TCHAR *name, int type)
 {
     return false;
 }
@@ -46,9 +46,11 @@ void gui_exit (void)
 {
 }
 
-void gui_fps (int fps, int idle, int color)
+void gui_fps (int fps, int lines, bool lace, int idle, int color)
 {
     gui_data.fps  = fps;
+    gui_data.lines = lines;
+    gui_data.lace = lace;
     gui_data.idle = idle;
     gui_data.fps_color = color;
 }

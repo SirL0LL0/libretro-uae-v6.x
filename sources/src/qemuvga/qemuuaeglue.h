@@ -3,10 +3,15 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdbool.h>
 #include <string.h>
+#ifndef _MSC_VER
+#include <sys/types.h>
+#endif
+#include "sysconfig.h"
 
+#ifdef DEBUGGER
 extern void activate_debugger(void);
+#endif
 
 //#define DEBUG_VGA_REG
 //#define DEBUG_VGA
@@ -20,7 +25,7 @@ extern void write_log (const char *, ...);
 #define tostring(s)	#s
 #endif
 
-#ifndef __LIBRETRO__
+#ifdef _MSC_VER
 typedef int ssize_t;
 #endif
 
@@ -83,7 +88,7 @@ enum device_endian {
 typedef enum vga_retrace_method {
     VGA_RETRACE_DUMB,
     VGA_RETRACE_PRECISE
-} vga_retrace_method;
+} vga_retrace_method; /* libretro: C typedef */
 extern vga_retrace_method vga_retrace_method_value;
 
 typedef uint32_t QEMUClock;
@@ -316,7 +321,7 @@ void cirrus_init_common(CirrusVGAState * s, int device_id, int is_pci,
 typedef struct DeviceState
 {
 	void *lsistate;
-} DeviceState;
+} DeviceState; /* libretro: C typedef */
 
 #define QEMUFile void*
 #define PCIDevice void
@@ -393,7 +398,7 @@ typedef struct BusState {
     int max_index;
 //    QTAILQ_HEAD(ChildrenHead, BusChild) children;
 //    QLIST_ENTRY(BusState) sibling;
-} BusState;
+} BusState; /* libretro: C typedef */
 
 
 extern void lsi710_mmio_write(void *opaque, hwaddr addr, uint64_t val, unsigned size);
@@ -406,4 +411,3 @@ extern uint64_t lsi_mmio_read(void *opaque, hwaddr addr, unsigned size);
 
 typedef void *qemu_irq;
 typedef void* SysBusDevice;
-

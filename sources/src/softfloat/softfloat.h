@@ -1,4 +1,7 @@
 #define SOFTFLOAT_68K
+#ifndef __cplusplus
+#include <stdbool.h>
+#endif
 #include "uae/types.h"
 
 /*

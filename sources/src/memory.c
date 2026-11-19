@@ -18,10 +18,8 @@
 #include "uae.h"
 #include "memory.h"
 #include "rommgr.h"
-#include "ersatz.h"
 #include "zfile.h"
 #include "custom.h"
-#include "events.h"
 #include "newcpu.h"
 #include "autoconf.h"
 #include "savestate.h"
@@ -30,18 +28,23 @@
 #include "gui.h"
 #include "cdtv.h"
 #include "akiko.h"
+#ifdef ARCADIA
 #include "arcadia.h"
+#endif
+#ifdef ENFORCER
 #include "enforcer.h"
-#include "threaddep/thread.h"
+#endif
 #include "gayle.h"
 #include "debug.h"
 #include "debugmem.h"
-#include "gfxboard.h"
 #include "cpuboard.h"
+#ifdef WITH_PPC
 #include "uae/ppc.h"
+#endif
 #include "devices.h"
-#include "inputdevice.h"
+#ifdef WITH_DRACO
 #include "draco.h"
+#endif
 
 #ifdef __LIBRETRO__
 extern bool retro_message;
@@ -50,12 +53,13 @@ extern char retro_message_msg[1024];
 
 bool canbang;
 uaecptr highest_ram;
-static bool rom_write_enabled;
+bool rom_write_enabled;
 #ifdef JIT
 /* Set by each memory handler that does not simply access real memory. */
 int special_mem, special_mem_default;
 /* do not use get_n_addr */
 int jit_n_addr_unsafe;
+int jit_n_addr_bank_unsafe;
 #endif
 static int mem_hardreset;
 static bool roms_modified;
@@ -77,7 +81,7 @@ static bool needmman (void)
 {
 	if (!jit_direct_compatible_memory)
 		return false;
-#ifdef _WIN32
+#ifdef NATMEM_OFFSET
 	return true;
 #endif
 	if (canjit ())
@@ -402,7 +406,6 @@ uae_u32 dummy_get (uaecptr addr, int size, bool inst, uae_u32 defvalue)
 		return currprefs.cpu_model > 68000 ? 0x0000 : 0xffff;
 	}
 	if (addr == 0xb0b000) {
-		extern bool isideint(void);
 		return isideint() ? 0xffff : 0x0000;
 	}
 #endif
@@ -681,7 +684,7 @@ static uae_u32 REGPARAM2 chipmem_bget_limit(uaecptr addr)
 	return v;
 }
 
-void REGPARAM2 chipmem_lput_limit(uaecptr addr, uae_u32 l)
+static void REGPARAM2 chipmem_lput_limit(uaecptr addr, uae_u32 l)
 {
 	uae_u32 *m;
 
@@ -693,7 +696,7 @@ void REGPARAM2 chipmem_lput_limit(uaecptr addr, uae_u32 l)
 	do_put_mem_long(m, l);
 }
 
-void REGPARAM2 chipmem_wput_limit(uaecptr addr, uae_u32 w)
+static void REGPARAM2 chipmem_wput_limit(uaecptr addr, uae_u32 w)
 {
 	uae_u16 *m;
 
@@ -705,7 +708,7 @@ void REGPARAM2 chipmem_wput_limit(uaecptr addr, uae_u32 w)
 	do_put_mem_word(m, w);
 }
 
-void REGPARAM2 chipmem_bput_limit(uaecptr addr, uae_u32 b)
+static void REGPARAM2 chipmem_bput_limit(uaecptr addr, uae_u32 b)
 {
 	addr &= chipmem_bank.mask;
 	if (addr >= 0x180000) {
@@ -1054,6 +1057,7 @@ uae_u16 kickstart_version;
 *
 */
 static int a1000_kickstart_mode;
+static uaecptr a1000_kickstart_size;
 static uae_u8 *a1000_bootrom;
 static void a1000_handle_kickstart (int mode)
 {
@@ -1062,12 +1066,15 @@ static void a1000_handle_kickstart (int mode)
 	protect_roms (false);
 	if (mode == 0) {
 		a1000_kickstart_mode = 0;
-		memcpy (kickmem_bank.baseaddr, kickmem_bank.baseaddr + ROM_SIZE_256, ROM_SIZE_256);
-		kickstart_version = (kickmem_bank.baseaddr[ROM_SIZE_256 + 12] << 8) | kickmem_bank.baseaddr[ROM_SIZE_256 + 13];
+		if (a1000_kickstart_size == ROM_SIZE_256) {
+			memcpy (kickmem_bank.baseaddr, kickmem_bank.baseaddr + ROM_SIZE_256, ROM_SIZE_256);
+		}
+		kickstart_version = (kickmem_bank.baseaddr[a1000_kickstart_size + 12] << 8) | kickmem_bank.baseaddr[a1000_kickstart_size + 13];
+		kickmem_bank.baseaddr_direct_r = kickmem_bank.baseaddr;
 	} else {
 		a1000_kickstart_mode = 1;
-		memcpy (kickmem_bank.baseaddr, a1000_bootrom, ROM_SIZE_256);
 		kickstart_version = 0;
+		kickmem_bank.baseaddr_direct_r = NULL;
 	}
 	if (kickstart_version == 0xffff)
 		kickstart_version = 0;
@@ -1078,34 +1085,116 @@ void a1000_reset (void)
 	a1000_handle_kickstart (1);
 }
 
-static void REGPARAM3 kickmem_lput (uaecptr, uae_u32) REGPARAM;
-static void REGPARAM3 kickmem_wput (uaecptr, uae_u32) REGPARAM;
-static void REGPARAM3 kickmem_bput (uaecptr, uae_u32) REGPARAM;
+static void REGPARAM3 kickmem_lput(uaecptr, uae_u32) REGPARAM;
+static void REGPARAM3 kickmem_wput(uaecptr, uae_u32) REGPARAM;
+static void REGPARAM3 kickmem_bput(uaecptr, uae_u32) REGPARAM;
+static uae_u32 REGPARAM3 kickmem_lget(uaecptr) REGPARAM;
+static uae_u32 REGPARAM3 kickmem_wget(uaecptr) REGPARAM;
+static uae_u32 REGPARAM3 kickmem_bget(uaecptr) REGPARAM;
 
-MEMORY_BGET(kickmem);
-MEMORY_WGET(kickmem);
-MEMORY_LGET(kickmem);
 MEMORY_CHECK(kickmem);
 MEMORY_XLATE(kickmem);
+
+extern bool get_power_led(void);
+
+static uaecptr get_a1000_addr(uaecptr addr)
+{
+	bool led = get_power_led();
+	addr -= led && a1000_kickstart_size == ROM_SIZE_512 ? ROM_SIZE_256 : 0;
+	return addr;
+}
+
+static uae_u32 REGPARAM2 kickmem_lget(uaecptr addr)
+{
+	uae_u32 *p;
+	if (a1000_kickstart_mode) {
+		if (addr >= 0x1000000 - ROM_SIZE_256) {
+			addr = get_a1000_addr(addr);
+			addr &= kickmem_bank.mask;
+			p = (uae_u32*)(kickmem_bank.baseaddr + addr);
+		} else {
+			addr &= kickmem_bank.mask;
+			p = (uae_u32*)(a1000_bootrom + addr);
+		}
+	} else {
+		addr &= kickmem_bank.mask;
+		p = (uae_u32*)(kickmem_bank.baseaddr + addr);
+	}
+	uae_u32 m = do_get_mem_long(p);
+#ifdef DEBUGGER
+	if (debug_dma) {
+		record_rom_access(kickmem_bank.start + addr, m, 4, false);
+	}
+#endif
+	return m;
+}
+static uae_u32 REGPARAM2 kickmem_wget(uaecptr addr)
+{
+	uae_u16 *p;
+	if (a1000_kickstart_mode) {
+		if (addr >= 0x1000000 - ROM_SIZE_256) {
+			addr = get_a1000_addr(addr);
+			addr &= kickmem_bank.mask;
+			p = (uae_u16*)(kickmem_bank.baseaddr + addr);
+		} else {
+			addr &= kickmem_bank.mask;
+			p = (uae_u16*)(a1000_bootrom + addr);
+		}
+	} else {
+		addr &= kickmem_bank.mask;
+		p = (uae_u16*)(kickmem_bank.baseaddr + addr);
+	}
+	uae_u16 m = do_get_mem_word(p);
+#ifdef DEBUGGER
+	if (debug_dma) {
+		record_rom_access(kickmem_bank.start + addr, m, 2, false);
+	}
+#endif
+	return m;
+}
+static uae_u32 REGPARAM2 kickmem_bget(uaecptr addr)
+{
+	uae_u8 *p;
+	if (a1000_kickstart_mode) {
+		if (addr >= 0x1000000 - ROM_SIZE_256) {
+			addr = get_a1000_addr(addr);
+			addr &= kickmem_bank.mask;
+			p = (uae_u8*)(kickmem_bank.baseaddr + addr);
+		} else {
+			addr &= kickmem_bank.mask;
+			p = (uae_u8*)(a1000_bootrom + addr);
+		}
+	} else {
+		addr &= kickmem_bank.mask;
+		p = (uae_u8*)(kickmem_bank.baseaddr + addr);
+	}
+	uae_u8 m = *p;
+#ifdef DEBUGGER
+	if (debug_dma) {
+		record_rom_access(kickmem_bank.start + addr, m, 1, false);
+	}
+#endif
+	return m;
+}
 
 static void REGPARAM2 kickmem_lput (uaecptr addr, uae_u32 b)
 {
 	uae_u32 *m;
-	if (currprefs.rom_readwrite && rom_write_enabled) {
-		addr &= kickmem_bank.mask;
-		m = (uae_u32 *)(kickmem_bank.baseaddr + addr);
-		do_put_mem_long (m, b);
-#if 0
-		if (addr == ROM_SIZE_512-4) {
-			rom_write_enabled = false;
-			write_log (_T("ROM write disabled\n"));
-		}
+#ifdef DEBUGGER
+	if (debug_dma) {
+		record_rom_access(kickmem_bank.start + addr, b, 4, true);
+	}
 #endif
+	if (currprefs.rom_readwrite || rom_write_enabled) {
+		addr &= kickmem_bank.mask;
+		m = (uae_u32*)(kickmem_bank.baseaddr + addr);
+		do_put_mem_long (m, b);
 	} else if (a1000_kickstart_mode) {
-		if (addr >= 0xfc0000) {
+		if (addr >= 0x1000000 - ROM_SIZE_256) {
+			addr = get_a1000_addr(addr);
 			addr &= kickmem_bank.mask;
-			m = (uae_u32 *)(kickmem_bank.baseaddr + addr);
-			do_put_mem_long (m, b);
+			m = (uae_u32*)(kickmem_bank.baseaddr + addr);
+			do_put_mem_long(m, b);
 			return;
 		} else
 			a1000_handle_kickstart (0);
@@ -1117,14 +1206,20 @@ static void REGPARAM2 kickmem_lput (uaecptr addr, uae_u32 b)
 static void REGPARAM2 kickmem_wput (uaecptr addr, uae_u32 b)
 {
 	uae_u16 *m;
-	if (currprefs.rom_readwrite && rom_write_enabled) {
+#ifdef DEBUGGER
+	if (debug_dma) {
+		record_rom_access(kickmem_bank.start + addr, b, 2, true);
+	}
+#endif
+	if (currprefs.rom_readwrite || rom_write_enabled) {
 		addr &= kickmem_bank.mask;
 		m = (uae_u16 *)(kickmem_bank.baseaddr + addr);
 		do_put_mem_word (m, b);
 	} else if (a1000_kickstart_mode) {
-		if (addr >= 0xfc0000) {
+		if (addr >= 0x1000000 - ROM_SIZE_256) {
+			addr = get_a1000_addr(addr);
 			addr &= kickmem_bank.mask;
-			m = (uae_u16 *)(kickmem_bank.baseaddr + addr);
+			m = (uae_u16*)(kickmem_bank.baseaddr + addr);
 			do_put_mem_word (m, b);
 			return;
 		} else
@@ -1136,16 +1231,23 @@ static void REGPARAM2 kickmem_wput (uaecptr addr, uae_u32 b)
 
 static void REGPARAM2 kickmem_bput (uaecptr addr, uae_u32 b)
 {
-	if (currprefs.rom_readwrite && rom_write_enabled) {
+#ifdef DEBUGGER
+	if (debug_dma) {
+		record_rom_access(kickmem_bank.start + addr, b, 1, true);
+	}
+#endif
+	if (currprefs.rom_readwrite || rom_write_enabled) {
 		addr &= kickmem_bank.mask;
 		kickmem_bank.baseaddr[addr] = b;
 	} else if (a1000_kickstart_mode) {
-		if (addr >= 0xfc0000) {
+		if (addr >= 0x1000000 - ROM_SIZE_256) {
+			addr = get_a1000_addr(addr);
 			addr &= kickmem_bank.mask;
 			kickmem_bank.baseaddr[addr] = b;
 			return;
-		} else
+		} else {
 			a1000_handle_kickstart (0);
+		}
 	} else if (currprefs.illegal_mem) {
 		write_log (_T("Illegal kickmem bput at %08x PC=%08x\n"), addr, M68K_GETPC);
 	}
@@ -1193,22 +1295,38 @@ MEMORY_LGET(extendedkickmem);
 MEMORY_CHECK(extendedkickmem);
 MEMORY_XLATE(extendedkickmem);
 
-static void REGPARAM2 extendedkickmem_lput (uaecptr addr, uae_u32 b)
+static void REGPARAM2 extendedkickmem_lput(uaecptr addr, uae_u32 b)
 {
-	if (currprefs.illegal_mem)
-		write_log (_T("Illegal extendedkickmem lput at %08x\n"), addr);
+	if (currprefs.rom_readwrite || rom_write_enabled) {
+		addr &= extendedkickmem_bank.mask;
+		uae_u32 *m = (uae_u32*)(extendedkickmem_bank.baseaddr + addr);
+		do_put_mem_long(m, b);
+	} else {
+		if (currprefs.illegal_mem)
+			write_log(_T("Illegal extendedkickmem lput at %08x PC=%08x\n"), addr, M68K_GETPC);
+	}
 }
-static void REGPARAM2 extendedkickmem_wput (uaecptr addr, uae_u32 b)
+static void REGPARAM2 extendedkickmem_wput(uaecptr addr, uae_u32 b)
 {
-	if (currprefs.illegal_mem)
-		write_log (_T("Illegal extendedkickmem wput at %08x\n"), addr);
+	if (currprefs.rom_readwrite || rom_write_enabled) {
+		addr &= extendedkickmem_bank.mask;
+		uae_u16 *m = (uae_u16*)(extendedkickmem_bank.baseaddr + addr);
+		do_put_mem_word(m, b);
+	} else {
+		if (currprefs.illegal_mem)
+			write_log(_T("Illegal extendedkickmem wput at %08x PC=%08x\n"), addr, M68K_GETPC);
+	}
 }
-static void REGPARAM2 extendedkickmem_bput (uaecptr addr, uae_u32 b)
+static void REGPARAM2 extendedkickmem_bput(uaecptr addr, uae_u32 b)
 {
-	if (currprefs.illegal_mem)
-		write_log (_T("Illegal extendedkickmem lput at %08x\n"), addr);
+	if (currprefs.rom_readwrite || rom_write_enabled) {
+		addr &= extendedkickmem_bank.mask;
+		extendedkickmem_bank.baseaddr[addr] = b;
+	} else {
+		if (currprefs.illegal_mem)
+			write_log(_T("Illegal extendedkickmem bput at %08x PC=%08x\n"), addr, M68K_GETPC);
+	}
 }
-
 
 static void REGPARAM3 extendedkickmem2a_lput(uaecptr, uae_u32) REGPARAM;
 static void REGPARAM3 extendedkickmem2a_wput(uaecptr, uae_u32) REGPARAM;
@@ -1231,36 +1349,69 @@ MEMORY_XLATE(extendedkickmem2b);
 
 static void REGPARAM2 extendedkickmem2a_lput (uaecptr addr, uae_u32 b)
 {
-	if (currprefs.illegal_mem)
-		write_log (_T("Illegal extendedkickmem2a lput at %08x\n"), addr);
+	if (currprefs.rom_readwrite || rom_write_enabled) {
+		addr &= extendedkickmem2a_bank.mask;
+		uae_u32 *m = (uae_u32*)(extendedkickmem2a_bank.baseaddr + addr);
+		do_put_mem_long(m, b);
+	} else {
+		if (currprefs.illegal_mem)
+			write_log (_T("Illegal extendedkickmem2a lput at %08x PC=%08x\n"), addr, M68K_GETPC);
+	}
 }
 static void REGPARAM2 extendedkickmem2a_wput (uaecptr addr, uae_u32 b)
 {
-	if (currprefs.illegal_mem)
-		write_log (_T("Illegal extendedkickmem2a wput at %08x\n"), addr);
+	if (currprefs.rom_readwrite || rom_write_enabled) {
+		addr &= extendedkickmem2a_bank.mask;
+		uae_u16 *m = (uae_u16*)(extendedkickmem2a_bank.baseaddr + addr);
+		do_put_mem_word(m, b);
+	} else {
+		if (currprefs.illegal_mem)
+			write_log (_T("Illegal extendedkickmem2a wput at %08x PC=%08x\n"), addr, M68K_GETPC);
+	}
 }
 static void REGPARAM2 extendedkickmem2a_bput (uaecptr addr, uae_u32 b)
 {
-	if (currprefs.illegal_mem)
-		write_log (_T("Illegal extendedkickmem2a lput at %08x\n"), addr);
+	if (currprefs.rom_readwrite || rom_write_enabled) {
+		addr &= extendedkickmem2a_bank.mask;
+		extendedkickmem2a_bank.baseaddr[addr] = b;
+	} else {
+		if (currprefs.illegal_mem)
+			write_log (_T("Illegal extendedkickmem2a bput at %08x PC=%08x\n"), addr, M68K_GETPC);
+	}
 }
 
 static void REGPARAM2 extendedkickmem2b_lput(uaecptr addr, uae_u32 b)
 {
-	if (currprefs.illegal_mem)
-		write_log(_T("Illegal extendedkickmem2b lput at %08x\n"), addr);
+	if (currprefs.rom_readwrite || rom_write_enabled) {
+		addr &= extendedkickmem2b_bank.mask;
+		uae_u32 *m = (uae_u32*)(extendedkickmem2b_bank.baseaddr + addr);
+		do_put_mem_long(m, b);
+	} else {
+		if (currprefs.illegal_mem)
+			write_log(_T("Illegal extendedkickmem2b lput at %08x PC=%08x\n"), addr, M68K_GETPC);
+	}
 }
 static void REGPARAM2 extendedkickmem2b_wput(uaecptr addr, uae_u32 b)
 {
-	if (currprefs.illegal_mem)
-		write_log(_T("Illegal extendedkickmem2b wput at %08x\n"), addr);
+	if (currprefs.rom_readwrite || rom_write_enabled) {
+		addr &= extendedkickmem2b_bank.mask;
+		uae_u16 *m = (uae_u16*)(extendedkickmem2b_bank.baseaddr + addr);
+		do_put_mem_word(m, b);
+	} else {
+		if (currprefs.illegal_mem)
+			write_log(_T("Illegal extendedkickmem2b wput at %08x PC=%08x\n"), addr, M68K_GETPC);
+	}
 }
 static void REGPARAM2 extendedkickmem2b_bput(uaecptr addr, uae_u32 b)
 {
-	if (currprefs.illegal_mem)
-		write_log(_T("Illegal extendedkickmem2b lput at %08x\n"), addr);
+	if (currprefs.rom_readwrite || rom_write_enabled) {
+		addr &= extendedkickmem2b_bank.mask;
+		extendedkickmem2b_bank.baseaddr[addr] = b;
+	} else {
+		if (currprefs.illegal_mem)
+			write_log(_T("Illegal extendedkickmem2b bput at %08x PC=%08x\n"), addr, M68K_GETPC);
+	}
 }
-
 
 /* Default memory access functions */
 
@@ -1308,7 +1459,9 @@ uae_u8 *REGPARAM2 default_xlate (uaecptr addr)
 					}
 					write_log (_T("\n"));
 				}
+#ifdef DEBUGGER
 				memory_map_dump();
+#endif
 			}
 			if (0 || (gary_toenb && (gary_nonrange(addr) || (size > 1 && gary_nonrange(addr + size - 1))))) {
 				hardware_exception2(addr, 0, true, true, size);
@@ -1439,7 +1592,7 @@ addrbank extendedkickmem2a_bank = {
 addrbank extendedkickmem2b_bank = {
 	extendedkickmem2b_lget, extendedkickmem2b_wget, extendedkickmem2b_bget,
 	extendedkickmem2b_lput, extendedkickmem2b_wput, extendedkickmem2b_bput,
-	extendedkickmem2b_xlate, extendedkickmem2b_check, NULL, _T("rom_b0"), _T("Extended 3nd Kickstart ROM"),
+	extendedkickmem2b_xlate, extendedkickmem2b_check, NULL, _T("rom_b0"), _T("Extended 3rd Kickstart ROM"),
 	extendedkickmem2b_lget, extendedkickmem2b_wget,
 	ABFLAG_ROM | ABFLAG_THREADSAFE | ABFLAG_CACHE_ENABLE_ALL | ABFLAG_DIRECTACCESS, 0, S_WRITE
 };
@@ -1645,17 +1798,24 @@ static int read_kickstart(struct zfile *f, uae_u8 *mem, int size, int dochecksum
 		return size;
 
 	if (currprefs.cs_a1000ram && i < ROM_SIZE_256) {
-		int off = 0;
-		if (!a1000_bootrom)
-			a1000_bootrom = xcalloc(uae_u8, ROM_SIZE_256);
-		while (off + i < ROM_SIZE_256) {
-			memcpy(a1000_bootrom + off, kickmem_bank.baseaddr, i);
-			off += i;
+		if (!a1000_bootrom) {
+			a1000_kickstart_size = ROM_SIZE_256;
+			if (is_board_enabled(&currprefs, ROMTYPE_512KWOM, 0)) {
+				a1000_kickstart_size = ROM_SIZE_512;
+			}
+			a1000_bootrom = xcalloc(uae_u8, ROM_SIZE_256 + 4);
 		}
-		memset(kickmem_bank.baseaddr, 0, kickmem_bank.allocated_size);
-		a1000_handle_kickstart(1);
-		dochecksum = 0;
-		i = ROM_SIZE_512;
+		if (i <= ROM_SIZE_256) {
+			int off = 0;
+			while (off + i < ROM_SIZE_256) {
+				memcpy(a1000_bootrom + off, kickmem_bank.baseaddr, i);
+				off += i;
+			}
+			memset(kickmem_bank.baseaddr, 0, kickmem_bank.allocated_size);
+			a1000_handle_kickstart(1);
+			dochecksum = 0;
+			i = ROM_SIZE_512;
+		}
 	}
 
 	for (j = 0; j < 256 && i >= ROM_SIZE_256; j++) {
@@ -1678,10 +1838,12 @@ static bool load_extendedkickstart (const TCHAR *romextfile, int type)
 
 	if (romextfile[0] == '\0')
 		return false;
+#ifdef ARCADIA
 	if (is_arcadia_rom (romextfile) == ARCADIA_BIOS) {
 		extendedkickmem_type = EXTENDED_ROM_ARCADIA;
 		return false;
 	}
+#endif
 	f = read_rom_name (romextfile, false);
 	if (!f) {
 		notify_user (NUMSG_NOEXTROM);
@@ -1690,11 +1852,13 @@ static bool load_extendedkickstart (const TCHAR *romextfile, int type)
 	zfile_fseek (f, 0, SEEK_END);
 	size = zfile_ftell32(f);
 	extendedkickmem_bank.reserved_size = ROM_SIZE_512;
+#ifdef ARCADIA
 	struct romdata *rd = get_alg_rom(romextfile);
 	if (rd) {
 		size = rd->size;
 		type = EXTENDED_ROM_ALG;
 	}
+#endif
 	off = 0;
 	if (type == 0) {
 		if (currprefs.cs_cd32cd) {
@@ -1785,7 +1949,9 @@ static bool load_kickstart_replacement(void)
 		currprefs.z3fastmem[0].size == 0 &&
 		currprefs.mbresmem_high.size == 0 &&
 		currprefs.mbresmem_low.size == 0 &&
-		currprefs.cpuboardmem1.size == 0) {
+		currprefs.cpuboardmem1.size == 0 &&
+		extendedkickmem2a_bank.allocated_size == 0 &&
+		extendedkickmem2b_bank.allocated_size == 0) {
 
 		changed_prefs.custom_memory_addrs[0] = currprefs.custom_memory_addrs[0] = 0xa80000;
 		changed_prefs.custom_memory_sizes[0] = currprefs.custom_memory_sizes[0] = 512 * 1024;
@@ -1913,17 +2079,23 @@ static struct zfile *get_kickstart_filehandle(struct uae_prefs *p)
 	return f;
 }
 
-extern struct zfile *read_executable_rom(struct zfile*, int size, int blocks);
 static const uae_u8 romend[20] = {
 	0x00, 0x08, 0x00, 0x00,
 	0x00, 0x18, 0x00, 0x19, 0x00, 0x1a, 0x00, 0x1b, 0x00, 0x1c, 0x00, 0x1d, 0x00, 0x1e, 0x00, 0x1f
 };
 
+static bool is_builtin_aros_rom(const TCHAR *romfile)
+{
+	return !_tcscmp(romfile, _T(":AROS")) || (_tcslen(romfile) > 5 && !_tcscmp(romfile + _tcslen(romfile) - 5, _T(":AROS")));
+}
+
 static int load_kickstart (void)
 {
 	TCHAR tmprom[MAX_DPATH];
+
+	rom_write_enabled = false;
 	cloanto_rom = 0;
-	if (!_tcscmp(currprefs.romfile, _T(":AROS"))) {
+	if (is_builtin_aros_rom(currprefs.romfile)) {
 		return load_kickstart_replacement();
 	}
 	_tcscpy(tmprom, currprefs.romfile);
@@ -1951,17 +2123,19 @@ static int load_kickstart (void)
 				int size = zfile_size32(zf);
 				zfile_fclose(f);
 				f = zf;
+				// Executable loaded ROMs are always read-write
+				rom_write_enabled = true;
 				if (size > ROM_SIZE_512) {
 					maxsize = zfile_size32(zf);
 					singlebigrom = true;
 					extendedkickmem2a_bank.reserved_size = 524288;
-					extendedkickmem2a_bank.mask = extendedkickmem2a_bank.allocated_size - 1;
 					extendedkickmem2a_bank.start = size > 2 * ROM_SIZE_512 ? 0xa00000 : 0xa80000;
 					mapped_malloc(&extendedkickmem2a_bank);
+					extendedkickmem2a_bank.mask = extendedkickmem2a_bank.allocated_size - 1;
 					extendedkickmem2b_bank.reserved_size = 524288;
+					extendedkickmem2b_bank.start = extendedkickmem2a_bank.start + 524288;
+					mapped_malloc(&extendedkickmem2b_bank);
 					extendedkickmem2b_bank.mask = extendedkickmem2a_bank.allocated_size - 1;
-					extendedkickmem2a_bank.start = extendedkickmem2a_bank.start + 524288;
-					mapped_malloc(&extendedkickmem2a_bank);
 					read_kickstart(f, extendedkickmem2a_bank.baseaddr, 524288, 0, 1);
 					read_kickstart(f, extendedkickmem2b_bank.baseaddr, 524288, 0, 1);
 					memset(kickmem_bank.baseaddr, 0, ROM_SIZE_512);
@@ -1987,6 +2161,11 @@ static int load_kickstart (void)
 				}
 				if (filesize >= ROM_SIZE_512 * 2) {
 					struct romdata *rd = getromdatabyzfile(f);
+					// CD32 with swapped upper and lower 512k?
+					if (rd && (rd->type & ROMTYPE_KICKCD32) && rd->size == ROM_SIZE_512) {
+						kspos = 0;
+						extpos = ROM_SIZE_512;
+					}
 					zfile_fseek(f, kspos, SEEK_SET);
 				}
 				if (filesize >= ROM_SIZE_512 * 4) {
@@ -2057,6 +2236,9 @@ static void set_direct_memory(addrbank *ab)
 {
 	if (!(ab->flags & ABFLAG_DIRECTACCESS))
 		return;
+	if (currprefs.cpu_memory_cycle_exact && currprefs.cpu_model < 68020) {
+		return;
+	}
 	ab->baseaddr_direct_r = ab->baseaddr;
 	if (!(ab->flags & ABFLAG_ROM))
 		ab->baseaddr_direct_w = ab->baseaddr;
@@ -2225,7 +2407,7 @@ bool mapped_malloc (addrbank *ab)
 	ab->baseaddr_direct_w = NULL;
 	ab->flags &= ~ABFLAG_MAPPED;
 
-	if (ab->label && ab->label[0] == '*') {
+	if (canbang && ab->label && ab->label[0] == '*') {
 		if (ab->start == 0 || ab->start == 0xffffffff) {
 			write_log(_T("mapped_malloc(*) without start address!\n"));
 			return false;
@@ -2254,7 +2436,8 @@ bool mapped_malloc (addrbank *ab)
 #endif
 			return true;
 		}
-		ab->baseaddr = xcalloc (uae_u8, ab->reserved_size + 4);
+		if (!uae_mman_alloc_nodirect(ab, ab->reserved_size + 4))
+			ab->baseaddr = xcalloc (uae_u8, ab->reserved_size + 4);
 		if (ab->baseaddr) {
 			// fill end of ram with ILLEGAL to catch direct PC falling out of RAM.
 			put_long_host(ab->baseaddr + ab->reserved_size, 0x4afc4afc);
@@ -2342,8 +2525,9 @@ bool mapped_malloc (addrbank *ab)
 static void init_mem_banks (void)
 {
 	// unsigned so i << 16 won't overflow to negative when i >= 32768
-	for (unsigned int i = 0; i < MEMORY_BANKS; i++)
+	for (unsigned int i = 0; i < MEMORY_BANKS; i++) {
 		put_mem_bank (i << 16, &dummy_bank, 0);
+	}
 #ifdef NATMEM_OFFSET
 	delete_shmmaps (0, 0xFFFF0000);
 #endif
@@ -2594,7 +2778,9 @@ static void allocate_memory (void)
 		if (a3000hmem_bank.allocated_size > 0)
 			restore_ram (a3000hmem_filepos, a3000hmem_bank.baseaddr);
 	} else {
+#ifdef ARCADIA
 		alg_flag = 0;
+#endif
 	}
 #ifdef AGA
 	chipmem_bank_ce2.baseaddr = chipmem_bank.baseaddr;
@@ -2604,7 +2790,14 @@ static void allocate_memory (void)
 	bogo_filepos = 0;
 	a3000lmem_filepos = 0;
 	a3000hmem_filepos = 0;
+#ifdef __LIBRETRO__
+	mem25bit_filepos = 0;
+#endif
 	cpuboard_init();
+#ifdef __LIBRETRO__
+	if (savestate_state == STATE_RESTORE)
+		cpuboard_restore_ram();
+#endif
 }
 
 static void setmemorywidth(struct ramboard *mb, addrbank *ab)
@@ -2717,7 +2910,7 @@ void map_overlay (int chip)
 
 	if (chip < 0)
 		chip = overlay_state;
-
+#ifdef WITH_DRACO
 	if (currprefs.cs_compatible == CP_CASABLANCA) {
 		casablanca_map_overlay();
 		return;
@@ -2725,7 +2918,7 @@ void map_overlay (int chip)
 		draco_map_overlay();
 		return;
 	}
-
+#endif
 	size = chipmem_bank.allocated_size >= 0x180000 ? (chipmem_bank.allocated_size >> 16) : 32;
 	if (bogomem_aliasing)
 		size = 8;
@@ -2993,9 +3186,18 @@ void memory_reset (void)
 
 	highest_ram = 0;
 	need_hardreset = false;
-	rom_write_enabled = true;
 #ifdef JIT
+	/* Start in direct n_addr mode; map_banks() will mark real
+	 * S_N_ADDR banks separately. High x86-64 natmem only needs
+	 * pointer-clean codegen, not helper fallback. */
 	jit_n_addr_unsafe = 0;
+	jit_n_addr_bank_unsafe = 0;
+#if defined(CPU_x86_64) && defined(NATMEM_OFFSET)
+	if ((uintptr_t)natmem_offset + natmem_reserved_size > (uintptr_t)0x100000000ULL) {
+		write_log(_T("JIT: jit_n_addr_unsafe enabled for high x86-64 natmem at %p\n"), natmem_offset);
+		jit_n_addr_unsafe = 1;
+	}
+#endif
 #endif
 	/* Use changed_prefs, as m68k_reset is called later.  */
 	if (last_address_space_24 != changed_prefs.address_space_24)
@@ -3130,7 +3332,7 @@ void memory_reset (void)
 	}
 	cpuboard_map();
 	map_banks_set(&kickmem_bank, 0xF8, 8, 0);
-	if (currprefs.maprom && _tcscmp(currprefs.romfile, _T(":AROS"))) {
+	if (currprefs.maprom && !is_builtin_aros_rom(currprefs.romfile)) {
 		if (!cpuboard_maprom())
 			map_banks_set(&kickram_bank, currprefs.maprom >> 16, extendedkickmem2a_bank.allocated_size ? 32 : (extendedkickmem_bank.allocated_size ? 16 : 8), 0);
 	}
@@ -3145,15 +3347,17 @@ void memory_reset (void)
 			map_banks_set(&kickmem_bank, addr, 8, 0);
 	}
 
-	if (a1000_bootrom)
+	if (a1000_bootrom) {
 		a1000_handle_kickstart (1);
+	}
 
 #ifdef AUTOCONFIG
 	expansion_map();
 #endif
 
-	if (a3000_f0)
+	if (a3000_f0) {
 		map_banks_set(&extendedkickmem_bank, 0xf0, 1, 0);
+	}
 
 	/* Map the chipmem into all of the lower 8MB */
 	map_overlay (1);
@@ -3173,14 +3377,17 @@ void memory_reset (void)
 		break;
 #endif
 	case EXTENDED_ROM_ALG:
+#ifdef ARCADIA
 		map_banks_set(&extendedkickmem_bank, 0xF0, 4, 0);
 		alg_map_banks();
+#endif
 		break;
 	}
 
 #ifdef AUTOCONFIG
-	if ((need_uae_boot_rom (&currprefs) && currprefs.uaeboard == 0) || currprefs.uaeboard == 1)
+	if ((need_uae_boot_rom (&currprefs) && currprefs.uaeboard == 0) || currprefs.uaeboard == 1) {
 		map_banks_set(&rtarea_bank, rtarea_base >> 16, 1, 0);
+	}
 #endif
 
 	if ((cloanto_rom || currprefs.cs_ksmirror_e0) && (currprefs.maprom != 0xe00000) && !extendedkickmem_type) {
@@ -3245,9 +3452,26 @@ void memory_reset (void)
 		}
 	}
 
+	// Map Z2/Z3 autoconfig RAM boards immediately because JIT does not like memory disappearing under it.
+	if (currprefs.cachesize) {
+		for (int i = 0; i < MAX_RAM_BOARDS; i++) {
+			if (fastmem_bank[i].start && fastmem_bank[i].allocated_size) {
+				map_banks_z2(&fastmem_bank[i], fastmem_bank[i].start >> 16, fastmem_bank[i].allocated_size >> 16);
+			}
+			if (z3fastmem_bank[i].start && z3fastmem_bank[i].allocated_size) {
+				map_banks_z3(&z3fastmem_bank[i], z3fastmem_bank[i].start >> 16, z3fastmem_bank[i].allocated_size >> 16);
+			}
+		}
+	}
+
 	if (mem_hardreset) {
 		memory_clear ();
 	}
+#if defined(NATMEM_OFFSET) && defined(CPU_AARCH64)
+	if (canbang) {
+		commit_natmem_gaps();
+	}
+#endif
 #ifndef __LIBRETRO__
 	write_log (_T("memory init end\n"));
 #endif
@@ -3268,7 +3492,8 @@ void memory_init (void)
 	extendedkickmem2b_bank.reserved_size = 0;
 	extendedkickmem_type = 0;
 	chipmem_bank.baseaddr = 0;
-	mem25bit_bank.reserved_size = mem25bit_bank.reserved_size = 0;
+	mem25bit_bank.reserved_size = 0;
+	mem25bit_bank.baseaddr = NULL;
 	a3000lmem_bank.reserved_size = a3000hmem_bank.reserved_size = 0;
 	a3000lmem_bank.baseaddr = a3000hmem_bank.baseaddr = NULL;
 	bogomem_bank.baseaddr = NULL;
@@ -3396,7 +3621,8 @@ static uae_u32 REGPARAM2 threadcpu_wget(uaecptr addr)
 
 	return v;
 }
-uae_u32 REGPARAM2 threadcpu_bget(uaecptr addr)
+
+static uae_u32 REGPARAM2 threadcpu_bget(uaecptr addr)
 {
 	uae_u32 v = process_cpu_indirect_memory_read(addr, 0);
 
@@ -3611,7 +3837,12 @@ void map_banks (addrbank *bank, int start, int size, int realsize)
 
 #ifdef JIT
 	if ((bank->jit_read_flag | bank->jit_write_flag) & S_N_ADDR) {
+		if (!jit_n_addr_bank_unsafe) {
+			write_log(_T("JIT: jit_n_addr_unsafe enabled by bank '%s' at %08x (r=%d w=%d)\n"),
+				bank->name ? bank->name : _T("<unnamed>"), start << 16, bank->jit_read_flag, bank->jit_write_flag);
+		}
 		jit_n_addr_unsafe = 1;
+		jit_n_addr_bank_unsafe = 1;
 	}
 #endif
 
@@ -3636,7 +3867,6 @@ bool validate_banks_z3(addrbank *bank, int start, int size)
 {
 	if (start < 0x1000 || size <= 0) {
 		error_log(_T("Z3 invalid map_banks(%s) start=%08x size=%08x\n"), bank->name, start << 16, size << 16);
-		cpu_halt(CPU_HALT_AUTOCONFIG_CONFLICT);
 		return false;
 	}
 	if (size > 0x4000 || start + size > 0xf000) {
@@ -3653,36 +3883,34 @@ bool validate_banks_z3(addrbank *bank, int start, int size)
 	return true;
 }
 
-void map_banks_z3(addrbank *bank, int start, int size)
+bool map_banks_z3(addrbank *bank, int start, int size)
 {
-	if (!validate_banks_z3(bank, start, size))
-		return;
+	if (!validate_banks_z3(bank, start, size)) {
+		return false;
+	}
 	map_banks(bank, start, size, 0);
+	return true;
 }
 
 bool validate_banks_z2(addrbank *bank, int start, int size)
 {
 	if (start < 0x20 || (start >= 0xa0 && start < 0xe9) || start >= 0xf0) {
 		error_log(_T("Z2 map_banks(%s) with invalid start address %08X\n"), bank->name, start << 16);
-		cpu_halt(CPU_HALT_AUTOCONFIG_CONFLICT);
 		return false;
 	}
 	if (start >= 0xe9) {
 		if (start + size > 0xf0) {
 			error_log(_T("Z2 map_banks(%s) with invalid region %08x - %08X\n"), bank->name, start << 16, (start + size) << 16);
-			cpu_halt(CPU_HALT_AUTOCONFIG_CONFLICT);
 			return false;
 		}
 	} else {
 		if (start + size > 0xa0) {
 			error_log(_T("Z2 map_banks(%s) with invalid region %08x - %08X\n"), bank->name, start << 16, (start + size) << 16);
-			cpu_halt(CPU_HALT_AUTOCONFIG_CONFLICT);
 			return false;
 		}
 	}
 	if (size <= 0 || size > 0x80) {
 		error_log(_T("Z2 map_banks(%s) with invalid size %08x\n"), bank->name, size);
-		cpu_halt(CPU_HALT_AUTOCONFIG_CONFLICT);
 		return false;
 	}
 	for (int i = start; i < start + size; i++) {
@@ -3696,11 +3924,13 @@ bool validate_banks_z2(addrbank *bank, int start, int size)
 }
 
 
-void map_banks_z2 (addrbank *bank, int start, int size)
+bool map_banks_z2 (addrbank *bank, int start, int size)
 {
-	if (!validate_banks_z2(bank, start, size))
-		return;
+	if (!validate_banks_z2(bank, start, size)) {
+		return false;
+	}
 	map_banks (bank, start, size, 0);
+	return true;
 }
 
 uae_u32 map_banks_z2_autosize(addrbank *bank, int start)
@@ -3753,11 +3983,23 @@ uae_u8 *save_bram(size_t *len)
 	return bogomem_bank.baseaddr;
 }
 
+#ifdef __LIBRETRO__
+/* libretro: 25-bit (accelerator board) RAM in save states; upstream had the
+ * restore side (mem25bit_filepos) but never saved the chunk */
+uae_u8 *save_mem25bitram(size_t *len)
+#else
 static uae_u8 *save_mem25bitram(size_t *len)
+#endif
 {
 	*len = mem25bit_bank.allocated_size;
 	return mem25bit_bank.baseaddr;
 }
+#ifdef __LIBRETRO__
+void restore_mem25bitram(int len, size_t filepos)
+{
+	mem25bit_filepos = filepos;
+}
+#endif
 
 uae_u8 *save_a3000lram(size_t *len)
 {
@@ -4166,6 +4408,13 @@ int memory_valid_address(uaecptr addr, uae_u32 size)
 	return addr + size <= ab->allocated_size;
 }
 
+void dma_put_long(uaecptr addr, uae_u32 v)
+{
+	addrbank *ab = &get_mem_bank(addr);
+	if (ab->flags & ABFLAG_NODMA)
+		return;
+	put_long(addr, v);
+}
 void dma_put_word(uaecptr addr, uae_u16 v)
 {
 	addrbank* ab = &get_mem_bank(addr);
@@ -4179,6 +4428,13 @@ void dma_put_byte(uaecptr addr, uae_u8 v)
 	if (ab->flags & ABFLAG_NODMA)
 		return;
 	put_byte(addr, v);
+}
+uae_u32 dma_get_long(uaecptr addr)
+{
+	addrbank *ab = &get_mem_bank(addr);
+	if (ab->flags & ABFLAG_NODMA)
+		return 0xffffffff;
+	return get_long(addr);
 }
 uae_u16 dma_get_word(uaecptr addr)
 {

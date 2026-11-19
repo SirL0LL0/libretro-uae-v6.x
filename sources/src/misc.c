@@ -32,6 +32,7 @@
 #include "sleep.h"
 #include "zfile.h"
 #include "xwin.h"
+#include "drawing.h"
 #include "gfxboard.h"
 #include "statusline.h"
 #include "devices.h"
@@ -53,14 +54,6 @@ void to_upper (TCHAR *s, int len)
 void to_lower (TCHAR *s, int len)
 {
    s = string_to_lower(s);
-}
-int same_aname (const TCHAR *an1, const TCHAR *an2)
-{
-#ifdef _WIN32
-   return CompareString (LOCALE_INVARIANT, NORM_IGNORECASE, an1, -1, an2, -1) == CSTR_EQUAL;
-#else
-   return string_is_equal(an1, an2);
-#endif
 }
 
 void png_set_expand (void) {}
@@ -135,7 +128,7 @@ typedef struct {
 
 /* internal prototypes */
 int get_guid_target (uae_u8 *out);
-uae_u8 *save_log (int bootlog, int *len);
+uae_u8 *save_log (int bootlog, size_t *len);
 void refreshtitle (void);
 int scan_roms (int show);
 void setid (struct uae_input_device *uid, int i, int slot, int sub, int port, int evt);
@@ -155,9 +148,131 @@ TCHAR start_path_data[MAX_DPATH];
 int saveimageoriginalpath = 0;
 int key_swap_hack = 0;
 
-int pissoff_value = 15000 * CYCLE_UNIT;
+/* pissoff_value is defined by events.c (see include/events.h) */
+extern int pissoff_value;
 
-uae_u8 *save_log (int bootlog, int *len)
+#include "savestate.h"
+#include "consolehook.h"
+
+/* The debug console is desktop-only; libretro has no console to shut down. */
+void consolehook_shutdown(void)
+{
+}
+
+/* ---------------------------------------------------------------------------
+ * Host-file helper declared in fsdb.h. Upstream implements it in
+ * od-unix/filesys_host.cpp; the libretro build keeps its own host glue in
+ * retrodep/, which does not provide it (nothing used it before the sync).
+ * --------------------------------------------------------------------------- */
+#include "fsdb.h"
+#include "zfile.h"
+
+bool my_existsfiledir(const TCHAR *name)
+{
+	return my_existsfile(name) || my_existsdir(name);
+}
+
+/* zfile_host.h: libretro does not fetch content from the internet
+ * (same as upstream's od-generic defaults) */
+#include "zfile_host.h"
+int host_internet_file_type(const TCHAR *name)
+{
+	(void)name;
+	return 0;
+}
+bool host_read_internet_file(const TCHAR *name, bool checkonly, uae_u8 **data, int *size)
+{
+	(void)name; (void)checkonly;
+	*data = NULL;
+	*size = 0;
+	return false;
+}
+
+/* ---------------------------------------------------------------------------
+ * uae/vm.h virtual-memory helpers.
+ *
+ * Upstream implements these per platform in od-unix/mman.cpp / od-win32/....
+ * Until now the libretro build never referenced them (the ELF link tolerates
+ * undefined symbols), but fpp_native.c's x87 control-word thunk does, and the
+ * Windows link runs with --no-undefined. Provide a small portable version here.
+ * --------------------------------------------------------------------------- */
+#include "uae/vm.h"
+
+#ifdef _WIN32
+int uae_vm_page_size(void)
+{
+	SYSTEM_INFO si;
+	GetSystemInfo(&si);
+	return (int)si.dwPageSize;
+}
+void *uae_vm_alloc(size_t size, int flags, int protect)
+{
+	DWORD fl = MEM_COMMIT | MEM_RESERVE;
+	switch (protect) {
+	case UAE_VM_READ_WRITE_EXECUTE: return VirtualAlloc(NULL, size, fl, PAGE_EXECUTE_READWRITE);
+	case UAE_VM_READ_EXECUTE:       return VirtualAlloc(NULL, size, fl, PAGE_EXECUTE_READ);
+	case UAE_VM_READ_WRITE:         return VirtualAlloc(NULL, size, fl, PAGE_READWRITE);
+	case UAE_VM_READ:               return VirtualAlloc(NULL, size, fl, PAGE_READONLY);
+	default:                        return VirtualAlloc(NULL, size, fl, PAGE_NOACCESS);
+	}
+}
+bool uae_vm_protect(void *address, size_t size, int protect)
+{
+	DWORD old;
+	switch (protect) {
+	case UAE_VM_READ_WRITE_EXECUTE: return VirtualProtect(address, size, PAGE_EXECUTE_READWRITE, &old) != 0;
+	case UAE_VM_READ_EXECUTE:       return VirtualProtect(address, size, PAGE_EXECUTE_READ, &old) != 0;
+	case UAE_VM_READ_WRITE:         return VirtualProtect(address, size, PAGE_READWRITE, &old) != 0;
+	case UAE_VM_READ:               return VirtualProtect(address, size, PAGE_READONLY, &old) != 0;
+	default:                        return VirtualProtect(address, size, PAGE_NOACCESS, &old) != 0;
+	}
+}
+bool uae_vm_free(void *address, size_t size)
+{
+	return VirtualFree(address, 0, MEM_RELEASE) != 0;
+}
+void uae_vm_jit_write_protect(bool enable_execute_mode)
+{
+	(void)enable_execute_mode;
+}
+#else /* POSIX */
+#include <sys/mman.h>
+#include <unistd.h>
+
+int uae_vm_page_size(void)
+{
+	return (int)sysconf(_SC_PAGESIZE);
+}
+static int vm_mmap_prot(int protect)
+{
+	switch (protect) {
+	case UAE_VM_READ_WRITE_EXECUTE: return PROT_READ | PROT_WRITE | PROT_EXEC;
+	case UAE_VM_READ_EXECUTE:       return PROT_READ | PROT_EXEC;
+	case UAE_VM_READ_WRITE:         return PROT_READ | PROT_WRITE;
+	case UAE_VM_READ:               return PROT_READ;
+	default:                        return PROT_NONE;
+	}
+}
+void *uae_vm_alloc(size_t size, int flags, int protect)
+{
+	void *p = mmap(NULL, size, vm_mmap_prot(protect), MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	return p == MAP_FAILED ? UAE_VM_ALLOC_FAILED : p;
+}
+bool uae_vm_protect(void *address, size_t size, int protect)
+{
+	return mprotect(address, size, vm_mmap_prot(protect)) == 0;
+}
+bool uae_vm_free(void *address, size_t size)
+{
+	return munmap(address, size) == 0;
+}
+void uae_vm_jit_write_protect(bool enable_execute_mode)
+{
+	(void)enable_execute_mode;
+}
+#endif
+
+uae_u8 *save_log (int bootlog, size_t *len)
 {
 	return NULL;
 }
@@ -395,6 +510,10 @@ int target_cfgfile_load (struct uae_prefs *p, const TCHAR *filename, int type, i
 	int ct, ct2, size;
 	char tmp1[MAX_DPATH], tmp2[MAX_DPATH];
 	TCHAR fname[MAX_DPATH], cname[MAX_DPATH];
+	/* Both were left uninitialized with __LIBRETRO__: cname was then
+	 * strcpy'd into config_filename (buffer overflow on a restart) */
+	fname[0] = 0;
+	cname[0] = 0;
 #ifndef __LIBRETRO__
 	error_log(NULL);
 	_tcscpy (fname, filename);
@@ -1269,7 +1388,12 @@ bool show_screen_maybe (int monid, bool show)
 bool render_screen (int monid, int mode, bool immediate)
 {
 #ifdef __LIBRETRO__
-	return false;
+	/* Host contract since WinUAE 6: the display limits must be (re)applied
+	 * every frame. Without this the Denise renderer treats every line as
+	 * hidden vertical blanking and outputs a black screen. No limits are
+	 * requested here: cropping is done by the libretro frontend. */
+	set_custom_limits(-1, -1, -1, -1);
+	return true;
 #else
 	struct AmigaMonitor *mon = &AMonitors[monid];
 	struct amigadisplay *ad = &adisplays[monid];
@@ -1636,7 +1760,7 @@ void protect_roms (bool protect) {}
 void mman_set_barriers(bool disable) {}
 #endif
 
-uae_u8 *save_screenshot(int monid, int *len)
+uae_u8 *save_screenshot(int monid, size_t *len)
 {
 	return NULL;
 }
@@ -1682,7 +1806,7 @@ void clipboard_unsafeperiod (void) {}
 int amiga_clipboard_want_data(TrapContext *ctx) { return 0; }
 
 void statusline_updated(int monid) {}
-void statusline_render(int monid, uae_u8 *buf, int bpp, int pitch, int width, int height, uae_u32 *rc, uae_u32 *gc, uae_u32 *bc, uae_u32 *alpha) {}
+void statusline_render(int monid, uae_u8 *buf, int pitch, int width, int height, uae_u32 *rc, uae_u32 *gc, uae_u32 *bc, uae_u32 *alpha) {}
 
 bool softstatusline(void)
 {
@@ -1728,7 +1852,7 @@ int is_tablet(void) { return 0; }
 int is_touch_lightpen(void) { return 0; }
 void release_keys(void) {}
 
-bool inprec_realtime (bool stopstart) { return false; }
+bool inprec_realtime (void) { return false; }
 void desktop_coords(int monid, int *dw, int *dh, int *ax, int *ay, int *aw, int *ah) {}
 void update_disassembly(uae_u32 addr) {}
 void update_memdump(uae_u32 addr) {}
@@ -1776,3 +1900,26 @@ uae_s64 getdurationvideograb(void)
 }
 
 void ldp_render(const char *txt, int len, uae_u8 *buf, struct vidbuffer *vd, int dx, int dy, int mx, int my) {}
+
+/* uae/time.h provides frame_time_t/read_processor_time() and expects the
+ * caller to supply uae_time(). libretro has no OS clock abstraction layer,
+ * so serve it from the host tick counter. */
+uae_time_t uae_time(void)
+{
+	return (uae_time_t)retro_ticks();
+}
+
+/* The libretro core has no interactive console. Upstream WinUAE still calls
+ * into these from the debugger, so provide inert implementations. */
+bool is_interactive_console(void)
+{
+	return false;
+}
+
+void deactivate_console(void)
+{
+}
+
+void set_console_input_mode(int mode)
+{
+}

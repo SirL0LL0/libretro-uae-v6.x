@@ -504,7 +504,7 @@ void caps_unloadimage (unsigned int drv)
     caps_locked[drv] = 0;
 }
 
-int caps_loadimage (struct zfile *zf, unsigned int drv, unsigned int *num_tracks)
+int caps_loadimage (struct zfile *zf, int drv, int *num_tracks)
 {
     struct CapsImageInfo ci;
     int len, ret;

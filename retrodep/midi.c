@@ -647,18 +647,18 @@ int Midi_Open(void)
 	unsigned long result = 0, i;
 	TCHAR err[MAX_DPATH];
 
-	if (currprefs.win32_midioutdev < -1)
+	if (currprefs.host_midioutdev < -1)
 		return 0;
-	if((result = midiOutOpen(&outHandle, currprefs.win32_midioutdev, 0, 0,CALLBACK_NULL))) {
-		write_log (_T("MIDI OUT: error %s / %d while opening port %d\n"), getmidiouterr(err, result), result, currprefs.win32_midioutdev);
+	if((result = midiOutOpen(&outHandle, currprefs.host_midioutdev, 0, 0,CALLBACK_NULL))) {
+		write_log (_T("MIDI OUT: error %s / %d while opening port %d\n"), getmidiouterr(err, result), result, currprefs.host_midioutdev);
 		result = 0;
 	} else {
 		InitializeCriticalSection(&cs_proc);
 		MidiSetVolume(outHandle);
 		// We don't need input for output...
-		if((currprefs.win32_midiindev >= 0) &&
-			(result = midiInOpen(&inHandle, currprefs.win32_midiindev, (DWORD_PTR)MidiInProc, 0, CALLBACK_FUNCTION|MIDI_IO_STATUS))) {
-				write_log (_T("MIDI IN: error %s / %d while opening port %d\n"), getmidiinerr(err, result), result, currprefs.win32_midiindev);
+		if((currprefs.host_midiindev >= 0) &&
+			(result = midiInOpen(&inHandle, currprefs.host_midiindev, (DWORD_PTR)MidiInProc, 0, CALLBACK_FUNCTION|MIDI_IO_STATUS))) {
+				write_log (_T("MIDI IN: error %s / %d while opening port %d\n"), getmidiinerr(err, result), result, currprefs.host_midiindev);
 		} else {
 			midi_in_ready = TRUE;
 			result=midiInStart(inHandle);

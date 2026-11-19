@@ -194,7 +194,7 @@ int fsdb_exists (const char *nname)
 }
 #else
 /* Return nonzero for any name we can't create on the native filesystem.  */
-int fsdb_name_invalid (const char *n)
+static int fsdb_name_invalid_name (const TCHAR *n)
 {
     if (strcmp (n, FSDB_FILE) == 0)
 	return 1;
@@ -205,6 +205,15 @@ int fsdb_name_invalid (const char *n)
     return n[1] == '.' && n[2] == '\0';
 }
 #endif
+
+/* Upstream added same_aname() together with these helper declarations; the
+ * fsdb_name_invalid()/fsdb_name_invalid_dir()/fsdb_exists() forms it also added
+ * duplicate the ones already implemented above for the libretro build, so only
+ * same_aname() is kept here. */
+int same_aname (const TCHAR *an1, const TCHAR *an2)
+{
+    return an1 && an2 && !_tcsicmp(an1, an2);
+}
 
 /* For an a_inode we have newly created based on a filename we found on the
  * native fs, fill in information about this file/directory.  */
@@ -244,17 +253,17 @@ int fsdb_set_file_attrs (a_inode *aino)
     mode = statbuf.st_mode;
     /* Unix dirs behave differently than AmigaOS ones.  */
     if (! aino->dir) {
-	if (mask & A_FIBF_READ)
+	if (aino->amigaos_mode & A_FIBF_READ)
 	    mode &= ~S_IRUSR;
 	else
 	    mode |= S_IRUSR;
 
-	if (mask & A_FIBF_WRITE)
+	if (aino->amigaos_mode & A_FIBF_WRITE)
 	    mode &= ~S_IWUSR;
 	else
 	    mode |= S_IWUSR;
 
-	if (mask & A_FIBF_EXECUTE)
+	if (aino->amigaos_mode & A_FIBF_EXECUTE)
 	    mode &= ~S_IXUSR;
 	else
 	    mode |= S_IXUSR;
@@ -262,7 +271,6 @@ int fsdb_set_file_attrs (a_inode *aino)
 	chmod (aino->nname, mode);
     }
 
-    aino->amigaos_mode = mask;
     aino->dirty = 1;
     return 0;
 }
@@ -295,8 +303,47 @@ int fsdb_mode_representable_p (const a_inode *aino, int amigaos_mode)
 int fsdb_mode_representable_p (const a_inode *aino)
 {
     if (aino->dir)
-	return aino->amigaos_mode == 0;
-    return (aino->amigaos_mode & (A_FIBF_DELETE | A_FIBF_SCRIPT | A_FIBF_PURE)) == 0;
+	return amigaos_mode == 0;
+    return (amigaos_mode & (A_FIBF_DELETE | A_FIBF_SCRIPT | A_FIBF_PURE)) == 0;
+}
+
+int fsdb_mode_supported (const a_inode *aino)
+{
+    return fsdb_mode_representable_p(aino, aino->amigaos_mode) ? aino->amigaos_mode : 0;
+}
+
+TCHAR *fsdb_search_dir (const TCHAR *dirname, TCHAR *rel, TCHAR **relalt)
+{
+    if (relalt) {
+	*relalt = NULL;
+    }
+    TCHAR *tmp = build_nname(dirname, rel);
+    if (!tmp) {
+	return NULL;
+    }
+    if (fsdb_exists(tmp)) {
+	xfree(tmp);
+	return rel;
+    }
+    xfree(tmp);
+
+    DIR *dir = opendir(dirname);
+    if (!dir) {
+	return NULL;
+    }
+    TCHAR *match = NULL;
+    for (;;) {
+	struct dirent *de = readdir(dir);
+	if (!de) {
+	    break;
+	}
+	if (same_aname(de->d_name, rel)) {
+	    match = !_tcscmp(de->d_name, rel) ? rel : my_strdup(de->d_name);
+	    break;
+	}
+    }
+    closedir(dir);
+    return match;
 }
 #endif
 

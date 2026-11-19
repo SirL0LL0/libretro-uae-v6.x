@@ -18284,8 +18284,6 @@ uae_u32 REGPARAM2 op_4e73_50_ff(uae_u32 opcode)
 		newsr = sr; newpc = pc;
 		if (frame == 0x0) {
 		m68k_areg(regs, 7) += offset; break; }
-		else if (frame == 0x1) {
-		m68k_areg(regs, 7) += offset; }
 		else if (frame == 0x2) {
 		m68k_areg(regs, 7) += offset + 4; break; }
 		else if (frame == 0x3) {
@@ -35980,7 +35978,7 @@ uae_u32 REGPARAM2 op_e8c0_50_ff(uae_u32 opcode)
 	int width = (((extra & 0x20 ? m68k_dreg(regs, extra & 7) : extra) - 1) & 0x1f) + 1;
 	uae_u32 tmp = m68k_dreg(regs, dstreg);
 	offset &= 0x1f;
-	tmp = (tmp << offset) | (tmp >> (32 - offset));
+	if (offset) tmp = (tmp << offset) | (tmp >> (32 - offset));
 	bdata[0] = tmp & ((1 << (32 - width)) - 1);
 	SET_ALWAYS_NFLG(((uae_s32)tmp) < 0 ? 1 : 0);
 	tmp >>= (32 - width);
@@ -36167,7 +36165,7 @@ uae_u32 REGPARAM2 op_e9c0_50_ff(uae_u32 opcode)
 	int width = (((extra & 0x20 ? m68k_dreg(regs, extra & 7) : extra) - 1) & 0x1f) + 1;
 	uae_u32 tmp = m68k_dreg(regs, dstreg);
 	offset &= 0x1f;
-	tmp = (tmp << offset) | (tmp >> (32 - offset));
+	if (offset) tmp = (tmp << offset) | (tmp >> (32 - offset));
 	bdata[0] = tmp & ((1 << (32 - width)) - 1);
 	SET_ALWAYS_NFLG(((uae_s32)tmp) < 0 ? 1 : 0);
 	tmp >>= (32 - width);
@@ -36362,14 +36360,14 @@ uae_u32 REGPARAM2 op_eac0_50_ff(uae_u32 opcode)
 	int width = (((extra & 0x20 ? m68k_dreg(regs, extra & 7) : extra) - 1) & 0x1f) + 1;
 	uae_u32 tmp = m68k_dreg(regs, dstreg);
 	offset &= 0x1f;
-	tmp = (tmp << offset) | (tmp >> (32 - offset));
+	if (offset) tmp = (tmp << offset) | (tmp >> (32 - offset));
 	bdata[0] = tmp & ((1 << (32 - width)) - 1);
 	SET_ALWAYS_NFLG(((uae_s32)tmp) < 0 ? 1 : 0);
 	tmp >>= (32 - width);
 	SET_ZFLG(tmp == 0); SET_VFLG(0); SET_CFLG(0);
 	tmp = tmp ^ (0xffffffffu >> (32 - width));
 	tmp = bdata[0] | (tmp << (32 - width));
-	m68k_dreg(regs, dstreg) = (tmp >> offset) | (tmp << (32 - offset));
+	m68k_dreg(regs, dstreg) = offset ? ((tmp >> offset) | (tmp << (32 - offset))) : tmp;
 	m68k_incpc(4);
 	return 0;
 }
@@ -36514,7 +36512,7 @@ uae_u32 REGPARAM2 op_ebc0_50_ff(uae_u32 opcode)
 	int width = (((extra & 0x20 ? m68k_dreg(regs, extra & 7) : extra) - 1) & 0x1f) + 1;
 	uae_u32 tmp = m68k_dreg(regs, dstreg);
 	offset &= 0x1f;
-	tmp = (tmp << offset) | (tmp >> (32 - offset));
+	if (offset) tmp = (tmp << offset) | (tmp >> (32 - offset));
 	bdata[0] = tmp & ((1 << (32 - width)) - 1);
 	SET_ALWAYS_NFLG(((uae_s32)tmp) < 0 ? 1 : 0);
 	tmp = (uae_s32)tmp >> (32 - width);
@@ -36709,14 +36707,14 @@ uae_u32 REGPARAM2 op_ecc0_50_ff(uae_u32 opcode)
 	int width = (((extra & 0x20 ? m68k_dreg(regs, extra & 7) : extra) - 1) & 0x1f) + 1;
 	uae_u32 tmp = m68k_dreg(regs, dstreg);
 	offset &= 0x1f;
-	tmp = (tmp << offset) | (tmp >> (32 - offset));
+	if (offset) tmp = (tmp << offset) | (tmp >> (32 - offset));
 	bdata[0] = tmp & ((1 << (32 - width)) - 1);
 	SET_ALWAYS_NFLG(((uae_s32)tmp) < 0 ? 1 : 0);
 	tmp >>= (32 - width);
 	SET_ZFLG(tmp == 0); SET_VFLG(0); SET_CFLG(0);
 	tmp = 0;
 	tmp = bdata[0] | (tmp << (32 - width));
-	m68k_dreg(regs, dstreg) = (tmp >> offset) | (tmp << (32 - offset));
+	m68k_dreg(regs, dstreg) = offset ? ((tmp >> offset) | (tmp << (32 - offset))) : tmp;
 	m68k_incpc(4);
 	return 0;
 }
@@ -36862,7 +36860,7 @@ uae_u32 REGPARAM2 op_edc0_50_ff(uae_u32 opcode)
 	uae_u32 offset2 = offset;
 	uae_u32 tmp = m68k_dreg(regs, dstreg);
 	offset &= 0x1f;
-	tmp = (tmp << offset) | (tmp >> (32 - offset));
+	if (offset) tmp = (tmp << offset) | (tmp >> (32 - offset));
 	bdata[0] = tmp & ((1 << (32 - width)) - 1);
 	SET_ALWAYS_NFLG(((uae_s32)tmp) < 0 ? 1 : 0);
 	tmp >>= (32 - width);
@@ -37080,14 +37078,14 @@ uae_u32 REGPARAM2 op_eec0_50_ff(uae_u32 opcode)
 	int width = (((extra & 0x20 ? m68k_dreg(regs, extra & 7) : extra) - 1) & 0x1f) + 1;
 	uae_u32 tmp = m68k_dreg(regs, dstreg);
 	offset &= 0x1f;
-	tmp = (tmp << offset) | (tmp >> (32 - offset));
+	if (offset) tmp = (tmp << offset) | (tmp >> (32 - offset));
 	bdata[0] = tmp & ((1 << (32 - width)) - 1);
 	SET_ALWAYS_NFLG(((uae_s32)tmp) < 0 ? 1 : 0);
 	tmp >>= (32 - width);
 	SET_ZFLG(tmp == 0); SET_VFLG(0); SET_CFLG(0);
 	tmp = 0xffffffffu >> (32 - width);
 	tmp = bdata[0] | (tmp << (32 - width));
-	m68k_dreg(regs, dstreg) = (tmp >> offset) | (tmp << (32 - offset));
+	m68k_dreg(regs, dstreg) = offset ? ((tmp >> offset) | (tmp << (32 - offset))) : tmp;
 	m68k_incpc(4);
 	return 0;
 }
@@ -37232,7 +37230,7 @@ uae_u32 REGPARAM2 op_efc0_50_ff(uae_u32 opcode)
 	int width = (((extra & 0x20 ? m68k_dreg(regs, extra & 7) : extra) - 1) & 0x1f) + 1;
 	uae_u32 tmp = m68k_dreg(regs, dstreg);
 	offset &= 0x1f;
-	tmp = (tmp << offset) | (tmp >> (32 - offset));
+	if (offset) tmp = (tmp << offset) | (tmp >> (32 - offset));
 	bdata[0] = tmp & ((1 << (32 - width)) - 1);
 	SET_ALWAYS_NFLG(((uae_s32)tmp) < 0 ? 1 : 0);
 	tmp >>= (32 - width);
@@ -37242,7 +37240,7 @@ uae_u32 REGPARAM2 op_efc0_50_ff(uae_u32 opcode)
 	SET_ALWAYS_NFLG(tmp & (1 << (width - 1)) ? 1 : 0);
 	SET_ZFLG(tmp == 0);
 	tmp = bdata[0] | (tmp << (32 - width));
-	m68k_dreg(regs, dstreg) = (tmp >> offset) | (tmp << (32 - offset));
+	m68k_dreg(regs, dstreg) = offset ? ((tmp >> offset) | (tmp << (32 - offset))) : tmp;
 	m68k_incpc(4);
 	return 0;
 }
@@ -40869,6 +40867,7 @@ uae_u32 REGPARAM2 op_003c_52_ff(uae_u32 opcode)
 	MakeSR();
 	uae_s16 src = get_iiword_jit(2);
 	src &= 0xFF;
+	if(regs.t0) check_t0_trace();
 	regs.sr |= src;
 	MakeFromSR();
 	m68k_incpc(4);
@@ -40900,6 +40899,7 @@ uae_u32 REGPARAM2 op_023c_52_ff(uae_u32 opcode)
 	uae_s16 src = get_iiword_jit(2);
 	src &= 0xFF;
 	src |= 0xff00;
+	if(regs.t0) check_t0_trace();
 	regs.sr &= src;
 	MakeFromSR();
 	m68k_incpc(4);
@@ -40930,6 +40930,7 @@ uae_u32 REGPARAM2 op_0a3c_52_ff(uae_u32 opcode)
 	MakeSR();
 	uae_s16 src = get_iiword_jit(2);
 	src &= 0xFF;
+	if(regs.t0) check_t0_trace();
 	regs.sr ^= src;
 	MakeFromSR();
 	m68k_incpc(4);
@@ -42424,6 +42425,27 @@ uae_u32 REGPARAM2 op_4800_52_ff(uae_u32 opcode)
 }
 /* 2 0,0   */
 
+/* LINK.L An,#<data>.L */
+#ifndef CPUEMU_68000_ONLY
+uae_u32 REGPARAM2 op_4808_52_ff(uae_u32 opcode)
+{
+	uae_u32 real_opcode = opcode;
+	uae_u32 srcreg = (real_opcode & 7);
+	uae_s32 src = m68k_areg(regs, srcreg);
+	uaecptr olda;
+	olda = m68k_areg(regs, 7) - 4;
+	m68k_areg(regs, 7) = olda;
+	uae_s32 offs;
+	offs = get_iilong_jit(2);
+	x_put_long(olda, src);
+	m68k_areg(regs, srcreg) = (m68k_areg(regs, 7));
+	m68k_areg(regs, 7) += offs;
+	m68k_incpc(6);
+	return 0;
+}
+/* 6 0,0   */
+
+#endif
 /* NBCD.B (An) */
 uae_u32 REGPARAM2 op_4810_52_ff(uae_u32 opcode)
 {
@@ -43287,6 +43309,24 @@ uae_u32 REGPARAM2 op_4cfb_52_ff(uae_u32 opcode)
 	return 0;
 }
 /* 4 2,0   */
+
+/* LINK.W An,#<data>.W */
+uae_u32 REGPARAM2 op_4e50_52_ff(uae_u32 opcode)
+{
+	uae_u32 real_opcode = opcode;
+	uae_u32 srcreg = (real_opcode & 7);
+	uae_s32 src = m68k_areg(regs, srcreg);
+	uaecptr olda;
+	olda = m68k_areg(regs, 7) - 4;
+	m68k_areg(regs, 7) = olda;
+	uae_s16 offs = get_iiword_jit(2);
+	x_put_long(olda, src);
+	m68k_areg(regs, srcreg) = (m68k_areg(regs, 7));
+	m68k_areg(regs, 7) += offs;
+	m68k_incpc(4);
+	return 0;
+}
+/* 4 0,0   */
 
 /* MVR2USP.L An */
 uae_u32 REGPARAM2 op_4e60_52_ff(uae_u32 opcode)
@@ -45192,6 +45232,7 @@ uae_u32 REGPARAM2 op_003c_53_ff(uae_u32 opcode)
 	MakeSR();
 	uae_s16 src = get_iiword_jit(2);
 	src &= 0xFF;
+	if(regs.t0) check_t0_trace();
 	regs.sr |= src;
 	MakeFromSR();
 	m68k_incpc(4);
@@ -45223,6 +45264,7 @@ uae_u32 REGPARAM2 op_023c_53_ff(uae_u32 opcode)
 	uae_s16 src = get_iiword_jit(2);
 	src &= 0xFF;
 	src |= 0xff00;
+	if(regs.t0) check_t0_trace();
 	regs.sr &= src;
 	MakeFromSR();
 	m68k_incpc(4);
@@ -45253,6 +45295,7 @@ uae_u32 REGPARAM2 op_0a3c_53_ff(uae_u32 opcode)
 	MakeSR();
 	uae_s16 src = get_iiword_jit(2);
 	src &= 0xFF;
+	if(regs.t0) check_t0_trace();
 	regs.sr ^= src;
 	MakeFromSR();
 	m68k_incpc(4);

@@ -15,6 +15,9 @@
 #include "xwin.h"
 #include "custom.h"
 #include "drawing.h"
+#ifdef WITH_MPEG2
+#include "cd32_fmv.h"
+#endif
 #include "hotkeys.h"
 #include "disk.h"
 #include "parser.h"
@@ -22,16 +25,19 @@
 #include "newcpu.h"
 extern int mouse_port[NORMAL_JPORTS];
 
-int log_scsi;
-int log_net;
+/* These are defined by the UAE core now; keep them as extern references so the
+ * link does not see two tentative definitions (GCC >= 10 defaults to -fno-common). */
+extern int log_scsi;
+extern int log_net;
 int tablet_log;
-int uaelib_debug;
+extern int uaelib_debug;
 bool beamracer_debug;
 float vsync_vblank, vsync_hblank;
 int busywait;
 int vsync_activeheight, vsync_totalheight;
-int max_uae_width = EMULATOR_MAX_WIDTH;
-int max_uae_height = EMULATOR_MAX_HEIGHT * 2;
+/* Upper bounds for the emulated display buffers (same as upstream hosts) */
+int max_uae_width = 8192;
+int max_uae_height = 8192;
 int pause_emulation;
 bool gfx_hdr;
 addrbank *gfxmem_banks[MAX_RTG_BOARDS];
@@ -51,15 +57,60 @@ extern unsigned char width_multiplier;
 unsigned short int* pixbuf = NULL;
 extern char retro_temp_directory[RETRO_PATH_MAX];
 
-int retro_thisframe_first_drawn_line;
-int retro_thisframe_last_drawn_line;
-int retro_min_diwstart;
+/* ---------------------------------------------------------------------------
+ * Video output
+ *
+ * Since WinUAE 6 the chipset emulation renders the complete visible raster
+ * (as defined by the emulated blanking and the overscan mode) into the
+ * display buffer, starting at its top left corner. The buffer is private to
+ * the emulation, exactly like in the upstream hosts.
+ *
+ * The frontend-facing picture, the "window" (retrow x retroh with the crop
+ * rectangle inside of it), is cut out of that raster once per frame by
+ * retro_video_blit(). Its position is still described by the two classic
+ * quantities, which used to steer the old renderer and are frontend-private
+ * now:
+ *
+ *   retro_visible_left_border  horizontal position of the left window edge
+ *   retro_thisframe_y_adjust   beam line shown on the first window row
+ *
+ * Horizontal positions are Denise horizontal counter values scaled to the
+ * raster resolution (one unit per lores pixel, two in hires, four in
+ * superhires): a standard DIWSTRT of $81 is 258 in hires. Vertical positions
+ * are beam line numbers: a standard DIWSTRT of $2C is line 44.
+ * ------------------------------------------------------------------------- */
+
+/* Size of the raster buffers: superhires width, double line height, with
+ * room for programmed (productivity) modes. */
+#define RETRO_RASTER_WIDTH   2048
+#define RETRO_RASTER_HEIGHT  1280
+
+/* Denise counts the pixels of a line (in superhires units) from a point that
+ * is 36 lores pixels after horizontal counter zero. */
+#define RETRO_DENISE_HCOUNTER_OFFSET (36 << RES_MAX)
+
+/* Value of the "nothing seen" markers of the per-frame display totals */
+#define RETRO_TOTAL_NONE 30000
+
+int retro_thisframe_first_drawn_line = -1;
+int retro_thisframe_last_drawn_line = -1;
+int retro_color_mode;
+int retro_min_diwstart = RETRO_TOTAL_NONE;
 int retro_max_diwstop;
 int retro_doublescan;
-extern int min_diwstart;
-extern int max_diwstop;
+int retro_visible_left_border;
+int retro_thisframe_y_adjust;
+int retro_minfirstline = VBLANK_ENDLINE_PAL;
 extern int doublescan;
 extern bool video_productivity;
+
+/* Per-frame display totals of the emulation (custom.c). They are reset by
+ * reset_autoscale() right after the frame has been finished. */
+extern int plffirstline_total, plflastline_total;
+extern int diwfirstword_total, diwlastword_total;
+extern int minfirstline_linear;
+/* First output column of the raster in Denise pixel counter units (drawing.c) */
+extern int retro_raster_xorigin(void);
 
 extern int opt_statusbar;
 extern int opt_statusbar_position;
@@ -298,21 +349,45 @@ void display_current_image(const char *image, bool inserted)
 }
 
 #include "statusline.h"
-extern void draw_status_line(int monid, int line, int statusy);
+/* Draw the emulation's LED row on top of the frontend picture. The LED
+ * renderer writes XRGB8888, a 16-bit picture is converted back and forth
+ * one row at a time. */
 static void retro_draw_frame_extras(void)
 {
-   struct amigadisplay *ad = &adisplays[0];
-   struct vidbuf_description *vidinfo = &ad->gfxvidinfo;
-   struct vidbuffer *vb = &vidinfo->drawbuffer;
-
+   static uint32_t row32[EMULATOR_MAX_WIDTH];
    int slx, sly;
    int mult = (video_config & PUAE_VIDEO_QUADLINE) ? 2 : 1;
-   statusline_getpos(vb->monitor_id, &slx, &sly, vb->outwidth, vb->outheight);
+
+   if (retrow > EMULATOR_MAX_WIDTH)
+      return;
+
+   statusline_getpos(0, &slx, &sly, retrow, retroh);
    for (int i = 0; i < TD_TOTAL_HEIGHT * mult; i++) {
       int line = sly + i;
-      if (line < 0)
+      if (line < 0 || line >= retroh)
          continue;
-      draw_status_line(vb->monitor_id, line, i);
+
+      if (pix_bytes == 4)
+         draw_status_line_single(0, (uae_u8*)retro_bmp + (size_t)line * retrow * 4,
+               i, retrow, xredcolors, xgreencolors, xbluecolors, NULL);
+      else
+      {
+         uint16_t *row16 = (uint16_t*)retro_bmp + (size_t)line * retrow;
+         int x;
+
+         for (x = 0; x < retrow; x++)
+         {
+            uint32_t p = row16[x];
+            row32[x] = ((p & 0xf800) << 8) | ((p & 0x07e0) << 5) | ((p & 0x001f) << 3);
+         }
+         draw_status_line_single(0, (uae_u8*)row32, i, retrow,
+               xredcolors, xgreencolors, xbluecolors, NULL);
+         for (x = 0; x < retrow; x++)
+         {
+            uint32_t p = row32[x];
+            row16[x] = ((p >> 8) & 0xf800) | ((p >> 5) & 0x07e0) | ((p >> 3) & 0x001f);
+         }
+      }
    }
 }
 
@@ -372,7 +447,7 @@ void print_statusbar(void)
       TEXT_Y = BOX_PADDING + retroy_crop;
    /* Bottom */
    else
-      TEXT_Y = gfxvidinfo->drawbuffer.outheight - opt_statusbar_position - BOX_HEIGHT + BOX_PADDING;
+      TEXT_Y = retroh - opt_statusbar_position - BOX_HEIGHT + BOX_PADDING;
 
    BOX_Y = TEXT_Y - BOX_PADDING;
 
@@ -638,16 +713,41 @@ void target_default_options (struct uae_prefs *p, int type)
    p->gfx_monitor[0].gfx_size_fs.height = EMULATOR_MAX_HEIGHT;
 
    /* Required for SCSI CD image mounts */
-   p->win32_automount_cddrives = true;
+   p->host_automount_cddrives = true;
 
    /* Required for parallel port joysticks */
-   p->win32_samplersoundcard = -1;
+   p->host_samplersoundcard = -1;
 }
+
+/* Line modes of doubled screens (core options, see libretro-core.c):
+ * interlaced 0 = double frames, 1 = double fields, 2 = double fields+;
+ * progressive 0 = double, 1 = scanlines, 2 = double fields, 3 = double fields+ */
+int puae_iscanlines = 1;
+bool puae_frame_not_rendered = false;
+/* Core option RTC type, -1 = the model's. Applied here because fixup_prefs()
+ * restores the model chipset settings (built_in_chipset_prefs) before calling
+ * target_fixup_options(). */
+int puae_rtc_override = -1;
+/* CPU chosen for the accelerator board (core option), 0 = none. Applied here
+ * for the same reason: the model options restore the model CPU. */
+int puae_cpuboard_cpu = 0;
+int puae_pscanlines = 0;
 
 void target_fixup_options (struct uae_prefs *p)
 {
-   p->gfx_iscanlines = 1;
-   p->gfx_pscanlines = 0;
+   p->gfx_iscanlines = puae_iscanlines;
+   p->gfx_pscanlines = puae_pscanlines;
+   if (puae_rtc_override >= 0)
+      p->cs_rtc = puae_rtc_override;
+   if (puae_cpuboard_cpu && p->cpuboard_type)
+   {
+      p->cpu_model = puae_cpuboard_cpu;
+      if (puae_cpuboard_cpu >= 68040)
+         p->fpu_model = puae_cpuboard_cpu;
+      if (p->mmu_model)
+         p->mmu_model = puae_cpuboard_cpu >= 68030 ? puae_cpuboard_cpu : 0;
+      p->address_space_24 = false;
+   }
 
    /* Allow only full Cycle-exact with 68000 */
    if (p->cpu_memory_cycle_exact && !p->cpu_cycle_exact && p->cpu_model < 68020)
@@ -780,15 +880,20 @@ void retro_key_up(int key)
    inputdevice_do_keyboard(keyboard_translation[key], 0);
 }
 
+static void retro_window_origin(int *x0, int *y0);
+
 /* Pointer / lightgun */
 void retro_lightpen_update(void)
 {
    uint8_t i;
    uint8_t buttons = 0;
    int x = 0, y = 0;
+   int window_x = 0, window_y = 0;
 
    if (!lightpen_enabled)
       return;
+
+   retro_window_origin(&window_x, &window_y);
 
    for (i = 0; i < 2; i++)
    {
@@ -809,41 +914,112 @@ void retro_lightpen_update(void)
       /* These are post-corrections to UAE internal
        * mouse-to-lightpen translation, which must
        * be active in order to lightpen be active.
-       * Buttons are set where mouse movement is set. */
-      lightpen_x[i] = x;
-      lightpen_y[i] = y;
+       * Buttons are set where mouse movement is set.
+       * The pointer is reported in window coordinates,
+       * the emulation expects raster coordinates. */
+      lightpen_x[i] = x + window_x;
+      lightpen_y[i] = y + window_y;
    }
 }
 
 
 /* Graphics */
-int lockscr(struct vidbuffer *vb, bool fullupdate, bool first, bool skip)
+int lockscr(struct vidbuffer *vb, bool fullupdate, bool first)
 {
+   /* Since WinUAE 6 the Denise renderer draws straight into the locked
+    * buffer while the frame is being emulated, and skips every line of a
+    * buffer that is not flagged as locked (see get_line() in drawing.c). */
+   if (!vb || !vb->bufmem)
+      return 0;
+   vb->locked = true;
    return 1;
+}
+
+/* Number of raster rows per beam line */
+static int retro_raster_vshift(void)
+{
+   int vshift = currprefs.gfx_vresolution;
+   if (doublescan > 0 && !interlace_seen)
+      vshift--;
+   if (vshift < 0)
+      vshift = 0;
+   if (vshift > VRES_QUAD)
+      vshift = VRES_QUAD;
+   return vshift;
+}
+
+/* Raster position of the top left window pixel */
+static void retro_window_origin(int *x0, int *y0)
+{
+   int raster_shift = RES_MAX - gethresolution();
+
+   *x0 = ((retro_visible_left_border << raster_shift) - RETRO_DENISE_HCOUNTER_OFFSET
+         - retro_raster_xorigin() + (1 << RES_MAX)) >> raster_shift;
+   *y0 = (retro_thisframe_y_adjust - minfirstline) << retro_raster_vshift();
+}
+
+/* Collect what the frontend needs to know about the frame that has just
+ * been drawn. This must happen here: the emulation resets its per-frame
+ * totals before control is returned to retro_run(). */
+static void retro_video_frame_info(void)
+{
+   /* Horizontal positions are counted in raster pixels: the raster has the
+    * selected resolution, or twice that in double scan modes, where the
+    * window is filled with the faster pixels as well */
+   int window_shift = RES_MAX - gethresolution();
+   int first = -1;
+   int last  = -1;
+
+   retro_doublescan = doublescan > 0;
+
+   /* Old style default top border: one line below the first raster row */
+   retro_minfirstline = minfirstline + 1;
+
+   /* Beam lines of the first and the last line with bitplanes */
+   if (     plffirstline_total < RETRO_TOTAL_NONE
+         && plflastline_total >= plffirstline_total)
+   {
+      first = plffirstline_total - minfirstline_linear + minfirstline;
+      last  = plflastline_total  - minfirstline_linear + minfirstline;
+
+      /* Align the resulting Automatic Crop screen height to even number */
+      if (!retro_av_info_is_lace && (last - first + 1) % 2)
+         last++;
+   }
+
+   retro_thisframe_first_drawn_line = first;
+   retro_thisframe_last_drawn_line  = last;
+
+   /* Horizontal display window limits */
+   if (     diwfirstword_total < RETRO_TOTAL_NONE
+         && diwlastword_total > diwfirstword_total)
+   {
+      retro_min_diwstart = (diwfirstword_total + RETRO_DENISE_HCOUNTER_OFFSET) >> window_shift;
+      retro_max_diwstop  = (diwlastword_total  + RETRO_DENISE_HCOUNTER_OFFSET) >> window_shift;
+   }
+   else
+   {
+      retro_min_diwstart = RETRO_TOTAL_NONE;
+      retro_max_diwstop  = 0;
+   }
+
+#ifdef WITH_MPEG2
+   /* CD32 FMV exceptions */
+   if (cd32_fmv_active)
+   {
+      retro_thisframe_first_drawn_line = retro_minfirstline;
+      retro_thisframe_last_drawn_line  = retro_minfirstline + (retroh / 2);
+      gui_flicker_led(LED_CD, 0, 1);
+   }
+#endif
 }
 
 void unlockscr(struct vidbuffer *vb, int y_start, int y_end)
 {
-   /* These values must be cached here, since the
-    * source variables will be reset before the frame
-    * ends and control is returned to the frontend */
-   retro_thisframe_first_drawn_line = thisframe_first_drawn_line;
-   retro_thisframe_last_drawn_line  = thisframe_last_drawn_line;
-   retro_min_diwstart               = min_diwstart;
-   retro_max_diwstop                = max_diwstop;
-   retro_doublescan                 = doublescan > 0;
+   if (vb)
+      vb->locked = false;
 
-   /* Align the resulting Automatic Crop screen height to even number */
-   if (!retro_av_info_is_lace && (retro_thisframe_last_drawn_line - retro_thisframe_first_drawn_line + 1) % 2)
-      retro_thisframe_last_drawn_line++;
-
-   if (retro_thisframe_first_drawn_line > 0)
-      retro_thisframe_first_drawn_line--;
-
-   if (retro_thisframe_last_drawn_line > 0)
-      retro_thisframe_last_drawn_line--;
-   if (!retro_thisframe_last_drawn_line)
-      retro_thisframe_last_drawn_line = -1;
+   retro_video_frame_info();
 
    /* Flag that we should end the frame, return out of retro_run */
    libretro_frame_end = true;
@@ -851,19 +1027,93 @@ void unlockscr(struct vidbuffer *vb, int y_start, int y_end)
 
    if (lightpen_enabled)
       retro_lightpen_update();
+}
 
-#ifdef WITH_MPEG2
-   /* CD32 FMV exceptions */
-   if (!changed_prefs.cartfile[0] && gfxvidinfo->drawbuffer.tempbufferinuse)
-      gfxvidinfo->drawbuffer.tempbufferinuse = false;
+/* Cut the window out of the raster the emulation has drawn and store it in
+ * the frontend buffer, converting to RGB565 when 16-bit output is selected
+ * (the emulation always renders 32-bit since WinUAE 6).
+ * Only the crop rectangle is transferred, parts of the window that fall
+ * outside of the raster are blank. */
+void retro_video_blit(void)
+{
+   struct vidbuffer *src = &gfxvidinfo->drawbuffer;
+   struct vidbuffer *in  = gfxvidinfo->inbuffer ? gfxvidinfo->inbuffer : src;
+   int raster_w          = in->inwidth;
+   int raster_h          = in->inheight;
+   int x0, y0, y;
 
-   if (gfxvidinfo->drawbuffer.tempbufferinuse)
+   if (!src->bufmem)
+      return;
+
+   /* Interlaced 'Double, frames' line mode: the emulation did not present the
+    * short field, keep showing the last complete frame */
+   if (puae_frame_not_rendered)
    {
-      retro_thisframe_first_drawn_line = thisframe_first_drawn_line = minfirstline;
-      retro_thisframe_last_drawn_line  = thisframe_last_drawn_line  = minfirstline + (retroh / 2);
-      gui_flicker_led(LED_CD, 0, 1);
+      puae_frame_not_rendered = false;
+      return;
    }
+
+   if (raster_w > src->width_allocated)
+      raster_w = src->width_allocated;
+   if (raster_h > src->height_allocated)
+      raster_h = src->height_allocated;
+
+   retro_window_origin(&x0, &y0);
+
+#if 0
+   printf("BLIT x0:%4d y0:%4d raster:%4dx%4d xorigin:%4d minfirstline:%3d hres:%d vshift:%d lborder:%4d yadjust:%3d crop:%dx%d+%d+%d window:%dx%d\n",
+         x0, y0, raster_w, raster_h, retro_raster_xorigin(), minfirstline, gethresolution(), retro_raster_vshift(),
+         retro_visible_left_border, retro_thisframe_y_adjust, retrow_crop, retroh_crop, retrox_crop, retroy_crop, retrow, retroh);
 #endif
+
+   x0 += retrox_crop;
+   y0 += retroy_crop;
+
+   for (y = 0; y < retroh_crop; y++)
+   {
+      int sy    = y0 + y;
+      int skip  = 0;
+      int count = retrow_crop;
+      uint8_t *dst = (uint8_t*)retro_bmp
+            + ((size_t)(retroy_crop + y) * retrow + retrox_crop) * pix_bytes;
+      const uint32_t *s;
+
+      if (sy < 0 || sy >= raster_h)
+      {
+         memset(dst, 0, (size_t)retrow_crop * pix_bytes);
+         continue;
+      }
+
+      /* Clip against the left and right raster edges */
+      if (x0 < 0)
+         skip = -x0;
+      if (skip > count)
+         skip = count;
+      if (x0 + count > raster_w)
+         count = raster_w - x0;
+      if (count < skip)
+         count = skip;
+
+      if (skip)
+         memset(dst, 0, (size_t)skip * pix_bytes);
+      if (count < retrow_crop)
+         memset(dst + (size_t)count * pix_bytes, 0, (size_t)(retrow_crop - count) * pix_bytes);
+
+      s = (const uint32_t*)(src->bufmem + (size_t)sy * src->rowbytes) + x0 + skip;
+
+      if (pix_bytes == 4)
+         memcpy(dst + (size_t)skip * 4, s, (size_t)(count - skip) * 4);
+      else
+      {
+         uint16_t *d = (uint16_t*)dst + skip;
+         int x;
+         for (x = skip; x < count; x++)
+         {
+            uint32_t p = *s++;
+            *d++ = ((p >> 8) & 0xf800) | ((p >> 5) & 0x07e0) | ((p >> 3) & 0x001f);
+         }
+      }
+   }
 }
 
 int graphics_init(bool mousecapture)
@@ -872,36 +1122,35 @@ int graphics_init(bool mousecapture)
       return 1;
 
    pixbuf = (unsigned short int*) &retro_bmp[0];
-   if (pixbuf == NULL)
+
+   /* The emulation gets its own display buffers, the frontend picture is
+    * copied out of them in retro_video_blit(). The second buffer is the
+    * intermediate target for overlays (CD32 FMV). */
+   gfxvidinfo->gfx_resolution_reserved  = RES_MAX;
+   gfxvidinfo->gfx_vresolution_reserved = VRES_MAX;
+   gfxvidinfo->xchange                  = 1;
+   gfxvidinfo->ychange                  = 1;
+
+   allocvidbuffer(0, &gfxvidinfo->drawbuffer, RETRO_RASTER_WIDTH, RETRO_RASTER_HEIGHT, 32);
+#ifdef WITH_MPEG2
+   allocvidbuffer(0, &gfxvidinfo->tempbuffer, RETRO_RASTER_WIDTH, RETRO_RASTER_HEIGHT, 32);
+#endif
+   if (!gfxvidinfo->drawbuffer.bufmem)
    {
       log_cb(RETRO_LOG_ERROR, "Error: not enough memory to initialize screen buffer!\n");
+      pixbuf = NULL;
       return -1;
    }
 
-   gfxvidinfo->drawbuffer.width_allocated    = defaultw;
-   gfxvidinfo->drawbuffer.height_allocated   = defaulth;
-   gfxvidinfo->drawbuffer.pixbytes           = pix_bytes;
-   gfxvidinfo->drawbuffer.rowbytes           = gfxvidinfo->drawbuffer.width_allocated * gfxvidinfo->drawbuffer.pixbytes;
-   gfxvidinfo->drawbuffer.bufmem             = (unsigned char*)pixbuf;
-   gfxvidinfo->drawbuffer.linemem            = 0;
-   gfxvidinfo->drawbuffer.emergmem           = 0;
+   gfxvidinfo->drawbuffer.initialized = true;
+   gfxvidinfo->tempbuffer.initialized = true;
+   gfxvidinfo->outbuffer              = &gfxvidinfo->drawbuffer;
+   gfxvidinfo->inbuffer               = &gfxvidinfo->drawbuffer;
 
    reset_drawing();
    graphics_setup();
    display_change_requested = 0;
 
-#ifdef WITH_MPEG2
-   allocvidbuffer(0, &gfxvidinfo->tempbuffer, defaultw, defaulth, pix_bytes * 8);
-   gfxvidinfo->tempbuffer.bufmem             = (unsigned char*)pixbuf;
-#endif
-
-#if 0
-   printf("%s: %dx%dx%d bufmem_alloc=%d\n", __func__,
-         gfxvidinfo->drawbuffer.width_allocated,
-         gfxvidinfo->drawbuffer.height_allocated,
-         gfxvidinfo->drawbuffer.pixbytes,
-         gfxvidinfo->drawbuffer.bufmem_allocated);
-#endif
    return 1;
 }
 
@@ -922,17 +1171,21 @@ int is_vsync (void)
 
 int graphics_setup(void)
 {
-   /* monid, Rw,Gw,Bw, Rs,Gs,Bs, Aw,As,Alpha, swap, yuv */
-   if (pix_bytes == 2)
-      alloc_colors64k (0, 5, 6, 5, 11, 5, 0, 0, 0, 0, 0, false);
-   else
-      alloc_colors64k (0, 8, 8, 8, 16, 8, 0, 0, 0, 0, 0, false);
+   /* The emulation always renders XRGB8888, a 16-bit frontend format is
+    * produced by retro_video_blit().
+    * monid, Rw,Gw,Bw, Rs,Gs,Bs, Aw,As,Alpha, swap */
+   alloc_colors64k (0, 8, 8, 8, 16, 8, 0, 0, 0, 0, 0);
 
    return 1;
 }
 
 void graphics_leave(void)
 {
+   freevidbuffer(0, &gfxvidinfo->drawbuffer);
+   freevidbuffer(0, &gfxvidinfo->tempbuffer);
+   gfxvidinfo->inbuffer  = NULL;
+   gfxvidinfo->outbuffer = NULL;
+   pixbuf = NULL;
 }
 
 void graphics_notify_state (int state)
@@ -972,33 +1225,24 @@ void toggle_fullscreen(int monid, int mode)
 
 int check_prefs_changed_gfx (void)
 {
+   static unsigned short int window_w = 0;
+   static unsigned short int window_h = 0;
    int changed = 0;
+   bool mode_changed = false;
 
    if (!config_changed && !display_change_requested)
       return 0;
 
-   if (gfxvidinfo->drawbuffer.width_allocated  != defaultw ||
-       gfxvidinfo->drawbuffer.height_allocated != defaulth)
+   /* Frontend window size. The emulation's own display buffers have a fixed
+    * size, the raster drawn into them only depends on the display mode. */
+   if (window_w != defaultw || window_h != defaulth)
    {
-      changed = 1;
+      window_w     = defaultw;
+      window_h     = defaulth;
+      changed      = 1;
+      mode_changed = true;
       changed_prefs.gfx_monitor[0].gfx_size_win.width  = defaultw;
       changed_prefs.gfx_monitor[0].gfx_size_win.height = defaulth;
-
-      gfxvidinfo->drawbuffer.width_allocated  = defaultw;
-      gfxvidinfo->drawbuffer.height_allocated = defaulth;
-      gfxvidinfo->drawbuffer.outwidth         = defaultw;
-      gfxvidinfo->drawbuffer.outheight        = defaulth;
-      gfxvidinfo->drawbuffer.rowbytes         = gfxvidinfo->drawbuffer.width_allocated * gfxvidinfo->drawbuffer.pixbytes;
-
-      init_hz_normal();
-
-#if 0
-   printf("%s: %dx%d, res=%d vres=%d\n", __func__,
-         changed_prefs.gfx_monitor[0].gfx_size_win.width,
-         changed_prefs.gfx_monitor[0].gfx_size_win.height,
-         changed_prefs.gfx_resolution,
-         changed_prefs.gfx_vresolution);
-#endif
    }
 
    if (currprefs.gfx_monitor[0].gfx_size_win.width   != changed_prefs.gfx_monitor[0].gfx_size_win.width)
@@ -1007,12 +1251,39 @@ int check_prefs_changed_gfx (void)
        currprefs.gfx_monitor[0].gfx_size_win.height   = changed_prefs.gfx_monitor[0].gfx_size_win.height;
 
    if (currprefs.gfx_resolution       != changed_prefs.gfx_resolution)
+   {
        currprefs.gfx_resolution        = changed_prefs.gfx_resolution;
+       mode_changed = true;
+   }
    if (currprefs.gfx_vresolution      != changed_prefs.gfx_vresolution)
+   {
        currprefs.gfx_vresolution       = changed_prefs.gfx_vresolution;
+       mode_changed = true;
+   }
 
    if (currprefs.gfx_scandoubler      != changed_prefs.gfx_scandoubler)
+   {
        currprefs.gfx_scandoubler       = changed_prefs.gfx_scandoubler;
+       mode_changed = true;
+   }
+
+   if (currprefs.gfx_lores_mode       != changed_prefs.gfx_lores_mode)
+   {
+       currprefs.gfx_lores_mode        = changed_prefs.gfx_lores_mode;
+       mode_changed = true;
+   }
+
+   if (currprefs.gfx_iscanlines       != changed_prefs.gfx_iscanlines ||
+       currprefs.gfx_pscanlines       != changed_prefs.gfx_pscanlines)
+   {
+       currprefs.gfx_iscanlines        = changed_prefs.gfx_iscanlines;
+       currprefs.gfx_pscanlines        = changed_prefs.gfx_pscanlines;
+       mode_changed = true;
+   }
+
+   /* The raster dimensions follow the resolution settings */
+   if (mode_changed)
+      init_hz();
 
    if (currprefs.gfx_luminance        != changed_prefs.gfx_luminance ||
        currprefs.gfx_contrast         != changed_prefs.gfx_contrast  ||
@@ -1027,7 +1298,7 @@ int check_prefs_changed_gfx (void)
    }
 
    /* 2 = 16bit, 5 = 32bit */
-   currprefs.color_mode = (pix_bytes == 2) ? 2 : 5;
+   retro_color_mode = (pix_bytes == 2) ? 2 : 5;
 
    return changed;
 }
@@ -2410,7 +2681,7 @@ void sevenzip_uncompress(const char *in, const char *out, char *lastfile)
    File_Close(&archiveStream.file);
 }
 #else
-void sevenzip_uncompress(char *in, char *out, char *lastfile)
+void sevenzip_uncompress(const char *in, const char *out, char *lastfile)
 {
 }
 #endif

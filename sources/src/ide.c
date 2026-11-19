@@ -25,6 +25,14 @@
 #include "ide.h"
 #include "ini.h"
 
+#ifdef __cplusplus
+#include <atomic>
+#else
+/* libretro builds the core as C99: the IDE interrupt hand-over uses the same
+ * memory barriers as upstream's C++ build, via the compiler builtins. */
+#include <stdint.h>
+#endif
+
 /* STATUS bits */
 #define IDE_STATUS_ERR 0x01		// 0
 #define IDE_STATUS_IDX 0x02		// 1
@@ -355,18 +363,33 @@ bool ide_isdrive (struct ide_hdf *ide)
 	return ide && (ide->hdhfd.size != 0 || ide->atapi);
 }
 
-static void ide_interrupt (struct ide_hdf *ide)
+/* Read/write and ATAPI commands complete on the "ide" thread, which fills
+ * secbuf, the registers and intdrq and then arms irq_delay. The CPU thread
+ * polls irq_delay in ide_interrupt_hsync() and only then builds the status
+ * from that state. The release/acquire fences make the thread's writes
+ * visible first: on weakly ordered hosts (ARM64) the CPU thread could
+ * otherwise see the armed delay but a stale intdrq, raise the interrupt
+ * without DRQ, and leave scsi.device polling for DRQ forever. */
+static void ide_arm_interrupt (struct ide_hdf *ide, int delay)
 {
 	ide->regs.ide_status |= IDE_STATUS_BSY;
 	ide->regs.ide_status &= ~IDE_STATUS_DRQ;
-	ide->irq_delay = 2;
+#ifdef __cplusplus
+	std::atomic_thread_fence(std::memory_order_release);
+#else
+	__atomic_thread_fence(__ATOMIC_RELEASE);
+#endif
+	*(volatile int*)&ide->irq_delay = delay;
+}
+
+static void ide_interrupt (struct ide_hdf *ide)
+{
+	ide_arm_interrupt (ide, 2);
 }
 
 static void ide_fast_interrupt (struct ide_hdf *ide)
 {
-	ide->regs.ide_status |= IDE_STATUS_BSY;
-	ide->regs.ide_status &= ~IDE_STATUS_DRQ;
-	ide->irq_delay = 1;
+	ide_arm_interrupt (ide, 1);
 }
 
 static bool ide_interrupt_do (struct ide_hdf *ide)
@@ -423,9 +446,15 @@ bool ide_interrupt_hsync(struct ide_hdf *idep)
 	for (int i = 0; idep && i < 2; i++) {
 		struct ide_hdf *ide = i == 0 ? idep : idep->pair;
 		if (ide) {
-			if (ide->irq_delay > 0) {
-				ide->irq_delay--;
-				if (ide->irq_delay == 0) {
+			const int delay = *(volatile int*)&ide->irq_delay;
+#ifdef __cplusplus
+			std::atomic_thread_fence(std::memory_order_acquire);
+#else
+			__atomic_thread_fence(__ATOMIC_ACQUIRE);
+#endif
+			if (delay > 0) {
+				ide->irq_delay = delay - 1;
+				if (delay == 1) {
 					ide_interrupt_do (ide);
 				}
 			}
@@ -443,6 +472,8 @@ static void ide_fail_err (struct ide_hdf *ide, uae_u8 err)
 		ide->pair->regs.ide_status |= IDE_STATUS_ERR;
 	}
 	ide->regs.ide_status |= IDE_STATUS_ERR;
+	ide->intdrq = false;
+	ide->data_multi = 0;
 	ide_interrupt (ide);
 }
 

@@ -11,6 +11,7 @@
 #include <assert.h>
 
 #include "options.h"
+#include "cpu_selection.h"
 #include "threaddep/thread.h"
 #include "uae.h"
 #include "gensound.h"
@@ -28,20 +29,21 @@
 #include "inputdevice.h"
 #include "keybuf.h"
 #include "gui.h"
+#include "target_main.h"
 #include "zfile.h"
 #include "autoconf.h"
-#include "picasso96.h"
 #include "native2amiga.h"
 #include "savestate.h"
-#include "filesys.h"
 #include "blkdev.h"
 #include "consolehook.h"
 #include "gfxboard.h"
+#ifdef WITH_LUA
 #include "luascript.h"
-#include "uaenative.h"
-#include "tabletlibrary.h"
+#endif
 #include "cpuboard.h"
+#ifdef WITH_PPC
 #include "uae/ppc.h"
+#endif
 #include "devices.h"
 #ifdef JIT
 #include "jit/compemu.h"
@@ -86,6 +88,7 @@ bool no_gui = 0, quit_to_gui = 0;
 bool cloanto_rom = 0;
 bool kickstart_rom = 1;
 bool console_emulation = 0;
+TCHAR console_path[MAX_DPATH] = { 0 };
 
 struct gui_info gui_data;
 
@@ -281,24 +284,9 @@ void fixup_cpu (struct uae_prefs *p)
 		p->fpu_model = 0;
 	}
 
-	switch (p->cpu_model)
-	{
-	case 68000:
-		break;
-	case 68010:
-		break;
-	case 68020:
-		break;
-	case 68030:
-		break;
-	case 68040:
-		if (p->fpu_model)
-			p->fpu_model = 68040;
-		break;
-	case 68060:
-		if (p->fpu_model)
-			p->fpu_model = 68060;
-		break;
+	if (p->cpu_model == 68040 || p->cpu_model == 68060) {
+		p->fpu_model = cpu_selection_fpu(p->cpu_model, p->fpu_model,
+			p->cpu_compatible, p->cpu_memory_cycle_exact);
 	}
 
 	if (p->cpu_thread && (p->cpu_compatible || p->ppc_mode || p->cpu_memory_cycle_exact || p->cpu_model < 68020)) {
@@ -306,6 +294,7 @@ void fixup_cpu (struct uae_prefs *p)
 		error_log(_T("Threaded CPU mode is not compatible with PPC emulation, More compatible or Cycle Exact modes. CPU type must be 68020 or higher."));
 	}
 
+#ifdef WITH_PPC
 	// 1 = "automatic" PPC config
 	if (p->ppc_mode == 1) {
 		cpuboard_setboard(p,  BOARD_CYBERSTORM, BOARD_CYBERSTORM_SUB_PPC);
@@ -319,6 +308,7 @@ void fixup_cpu (struct uae_prefs *p)
 		if (p->cpuboardmem1.size < 8 * 1024 * 1024)
 			p->cpuboardmem1.size = 8 * 1024 * 1024;
 	}
+#endif
 
 	if (p->cachesize_inhibit) {
 		p->cachesize = 0;
@@ -327,7 +317,7 @@ void fixup_cpu (struct uae_prefs *p)
 		p->cachesize = 0;
 		error_log (_T("JIT requires 68020 or better CPU."));
 	}
-	if (p->fpu_model == 0 && p->compfpu) {
+	if ((p->fpu_model == 0 || !p->cachesize) && p->compfpu) {
 		p->compfpu = false;
 	}
 
@@ -337,7 +327,7 @@ void fixup_cpu (struct uae_prefs *p)
 	if (p->cpu_model >= 68040 && p->cachesize && p->cpu_compatible)
 		p->cpu_compatible = false;
 
-	if ((p->cpu_model < 68030 || p->cachesize) && p->mmu_model) {
+	if (!cpu_selection_mmu(p->cpu_model, p->cachesize != 0) && p->mmu_model) {
 		error_log (_T("MMU emulation requires 68030/040/060 and it is not JIT compatible."));
 		p->mmu_model = 0;
 	}
@@ -384,12 +374,6 @@ void fixup_cpu (struct uae_prefs *p)
 		p->m68k_speed = 0;
 #endif
 
-#if 0
-	if (p->immediate_blits && p->blitter_cycle_exact) {
-		error_log (_T("Cycle-exact and immediate blitter can't be enabled simultaneously.\n"));
-		p->immediate_blits = false;
-	}
-#endif
 	if (p->immediate_blits && p->waiting_blits) {
 		error_log (_T("Immediate blitter and waiting blits can't be enabled simultaneously.\n"));
 		p->waiting_blits = 0;
@@ -411,7 +395,7 @@ void fixup_cpu (struct uae_prefs *p)
 		error_log(_T("Cycle-exact mode requires at least Disabled but emulated sound setting."));
 	}
 
-	if (p->cpu_data_cache && (!p->cpu_compatible || p->cachesize || p->cpu_model < 68030)) {
+	if (p->cpu_data_cache && !cpu_selection_data_cache(p->cpu_model, p->cpu_compatible, p->cachesize != 0)) {
 		p->cpu_data_cache = false;
 		error_log(_T("Data cache emulation requires More compatible, is not JIT compatible, 68030+ only."));
 	}
@@ -503,8 +487,16 @@ void fixup_prefs (struct uae_prefs *p, bool userconfig)
 	}
 #endif
 
+	bool initial_monitor = false;
 	for (int i = 0; i < MAX_RTG_BOARDS; i++) {
 		struct rtgboardconfig *rbc = &p->rtgboards[i];
+		if (rbc->initial_active) {
+			if (initial_monitor) {
+				rbc->initial_active = false;
+				error_log(_T("Only one graphics card can be initial active."));
+			}
+			initial_monitor = true;
+		}
 		if (rbc->monitor_id > 0 && p->monitoremu_mon == rbc->monitor_id) {
 			error_log(_T("Video port monitor %d was allocated for graphics card %d."), rbc->monitor_id + 1, i + 1);
 			p->monitoremu_mon = 0;
@@ -804,8 +796,9 @@ void fixup_prefs (struct uae_prefs *p, bool userconfig)
 #endif
 	}
 #endif
-	if (p->gfx_framerate < 1)
+	if (p->gfx_framerate < 1) {
 		p->gfx_framerate = 1;
+	}
 	if (p->gfx_display_sections < 1) {
 		p->gfx_display_sections = 1;
 	} else if (p->gfx_display_sections > 99) {
@@ -822,12 +815,27 @@ void fixup_prefs (struct uae_prefs *p, bool userconfig)
 		p->maprom = 0;
 	}
 
-	if (p->tod_hack && p->cs_ciaatod == 0)
+	if (p->tod_hack && p->cs_ciaatod == 0) {
 		p->cs_ciaatod = p->ntscmode ? 2 : 1;
+	}
 
 	// PCem does not support max speed.
-	if (p->x86_speed_throttle < 0)
+	if (p->x86_speed_throttle < 0) {
 		p->x86_speed_throttle = 0;
+	}
+
+	if (p->cs_hsyncadjust < 2 * 4 * 2) {
+		p->cs_hsyncadjust = 2 * 4 * 2;
+	}
+	if (p->cs_hsyncadjust > 20 * 4 * 2) {
+		p->cs_hsyncadjust = 20 * 4 * 2;
+	}
+	if (p->cs_vsyncadjust < 0) {
+		p->cs_vsyncadjust = 0;
+	}
+	if (p->cs_vsyncadjust > 20 * 2) {
+		p->cs_vsyncadjust = 20 * 2;
+	}
 
 	built_in_chipset_prefs (p);
 	blkdev_fix_prefs (p);
@@ -852,6 +860,7 @@ void uae_reset (int hardreset, int keyboardreset)
 	currprefs.quitstatefile[0] = changed_prefs.quitstatefile[0] = 0;
 
 	if (quit_program == 0) {
+		consolehook_shutdown();
 		quit_program = -UAE_RESET;
 		if (keyboardreset)
 			quit_program = -UAE_RESET_KEYBOARD;
@@ -866,6 +875,7 @@ void uae_quit (void)
 #ifdef DEBUGGER
 	deactivate_debugger ();
 #endif
+	consolehook_shutdown();
 	if (quit_program != -UAE_QUIT)
 		quit_program = -UAE_QUIT;
 	target_quit ();
@@ -885,6 +895,270 @@ void uae_restart(struct uae_prefs *p, int opengui, const TCHAR *cfgfile)
 	target_restart ();
 }
 
+#ifndef __LIBRETRO__
+int pngprint = 0;
+extern int console_logging, log_scsi, log_scsiemu;
+extern int enable_ds_partition_hdf, log_filesys, log_net, log_sercon;
+extern int log_a2065, a2065_promiscuous, log_uaeserial, log_vsync;
+extern int log_bsd, clipboard_debug, clipboard_log, log_dsp, log_cd32;
+extern int floppy_writemode, multithread_enabled, log_ethernet;
+extern int debug_vsync_min_delay, debug_vsync_forced_delay, log_blitter;
+extern int inputdevice_logging, slirp_debug, log_ld, kb_mcu_log;
+extern int inputrecord_debug;
+extern TCHAR *conlogfile;
+
+static int core_arg_value(const TCHAR *s)
+{
+	int base = 10;
+	TCHAR *end;
+	if (s[0] == '0' && _totupper(s[1]) == 'X') {
+		s += 2;
+		base = 16;
+	}
+	int value = _tcstol(s, &end, base);
+	return *s && !*end ? value : 0;
+}
+
+int parse_core_arg(const TCHAR *argx, const TCHAR *np, const TCHAR *np2)
+{
+	if (!argx || (argx[0] != '-' && argx[0] != '/')) {
+		return 0;
+	}
+	const TCHAR *arg = argx + 1;
+	if (!_tcscmp(arg, _T("convert")) && np && np2) {
+		zfile_convertimage(np, np2);
+		return -1;
+	}
+
+	if (!_tcscmp(arg, _T("log"))) {
+		console_logging = 1;
+		return 1;
+	}
+
+#ifdef PARALLEL_PORT
+	if (!_tcscmp(arg, _T("pngprint"))) {
+		pngprint = 1;
+		return 1;
+	}
+#endif
+
+	if (!_tcscmp(arg, _T("scsilog"))) {
+		log_scsi = 1;
+		return 1;
+	}
+
+	if (!_tcscmp(arg, _T("scsiemulog"))) {
+		log_scsiemu = 1;
+		return 1;
+	}
+
+#ifdef FILESYS
+	if (!_tcscmp(arg, _T("ds_partition_hdf"))) {
+		enable_ds_partition_hdf = 1;
+		return 1;
+	}
+	if (!_tcscmp(arg, _T("filesyslog"))) {
+		log_filesys = 1;
+		return 1;
+	}
+	if (!_tcscmp(arg, _T("filesyslog2"))) {
+		log_filesys = 2;
+		return 1;
+	}
+#endif
+
+#ifdef SANA2
+	if (!_tcscmp(arg, _T("netlog"))) {
+		log_net = 1;
+		return 1;
+	}
+#endif
+
+#ifdef SERIAL_PORT
+	if (!_tcscmp(arg, _T("serlog"))) {
+		log_sercon = 1;
+		return 1;
+	}
+	if (!_tcscmp(arg, _T("serlog2"))) {
+		log_sercon = 2;
+		return 1;
+	}
+	if (!_tcscmp(arg, _T("serlog3"))) {
+		log_sercon = 3;
+		return 1;
+	}
+#endif
+
+#ifdef A2065
+	if (!_tcscmp(arg, _T("a2065log"))) {
+		log_a2065 = 1;
+		return 1;
+	}
+	if (!_tcscmp(arg, _T("a2065log2"))) {
+		log_a2065 = 2;
+		return 1;
+	}
+	if (!_tcscmp(arg, _T("a2065log3"))) {
+		log_a2065 = 3;
+		return 1;
+	}
+	if (!_tcscmp(arg, _T("a2065_promiscuous"))) {
+		a2065_promiscuous = 1;
+		return 1;
+	}
+#endif
+
+#ifdef UAESERIAL
+	if (!_tcscmp(arg, _T("seriallog"))) {
+		log_uaeserial = 1;
+		return 1;
+	}
+#endif
+
+	if (!_tcscmp(arg, _T("vsynclog")) || !_tcscmp(arg, _T("vsynclog1"))) {
+		log_vsync |= 1;
+		return 1;
+	}
+
+	if (!_tcscmp(arg, _T("vsynclog2"))) {
+		log_vsync |= 2;
+		return 1;
+	}
+
+#ifdef BSDSOCKET
+	if (!_tcscmp(arg, _T("bsdlog"))) {
+		log_bsd = 1;
+		return 1;
+	}
+#endif
+
+	if (!_tcscmp(arg, _T("clipboarddebug"))) {
+		clipboard_debug = 1;
+		return 1;
+	}
+
+	if (!_tcscmp(arg, _T("clipboardlog"))) {
+		clipboard_log = 1;
+		return 1;
+	}
+
+#ifdef WITH_DSP
+	if (!_tcscmp(arg, _T("dsplog"))) {
+		log_dsp = 1;
+		return 1;
+	}
+#endif
+
+	if (!_tcscmp(arg, _T("quittogui"))) {
+		quit_to_gui = 1;
+		return 1;
+	}
+
+#ifdef CD32
+	if (!_tcscmp(arg, _T("cd32log"))) {
+		if (log_cd32 < 1) {
+			log_cd32 = 1;
+		}
+		return 1;
+	}
+	if (!_tcscmp(arg, _T("cd32log2"))) {
+		if (log_cd32 < 2) {
+			log_cd32 = 2;
+		}
+		return 1;
+	}
+#endif
+
+	if (!_tcscmp(arg, _T("romlist"))) {
+		void dumpromlist(void);
+		dumpromlist();
+		return -1;
+	}
+
+	if (!_tcscmp(arg, _T("rawextadf"))) {
+		floppy_writemode = -1;
+		return 1;
+	}
+
+	if (!_tcscmp(arg, _T("nomt"))) {
+		multithread_enabled = 0;
+		return 1;
+	}
+
+#ifdef SANA2
+	if (!_tcscmp(arg, _T("ethlog")) && np) {
+		log_ethernet = core_arg_value(np);
+		return 2;
+	}
+#endif
+
+	if (!_tcscmp (arg, _T("vsync_min_delay")) && np) {
+		debug_vsync_min_delay = core_arg_value (np);
+		return 2;
+	}
+
+	if (!_tcscmp (arg, _T("vsync_forced_delay")) && np) {
+		debug_vsync_forced_delay = core_arg_value (np);
+		return 2;
+	}
+
+	if (!_tcscmp (arg, _T("blitterdebug")) && np) {
+		log_blitter = core_arg_value (np);
+		return 2;
+	}
+
+	if (!_tcscmp (arg, _T("inputdevicelog")) && np) {
+		inputdevice_logging = core_arg_value (np);
+		return 2;
+	}
+
+#ifdef WITH_SLIRP
+	if (!_tcscmp (arg, _T("slirplog")) && np) {
+		slirp_debug = core_arg_value (np);
+		return 2;
+	}
+#endif
+
+#ifdef ARCADIA
+	if (!_tcscmp (arg, _T("ldlog")) && np) {
+		log_ld = core_arg_value (np);
+		return 2;
+	}
+#endif
+
+	if (!_tcscmp (arg, _T("kbmculog")) && np) {
+		kb_mcu_log = core_arg_value (np);
+		return 2;
+	}
+
+	if (!_tcscmp(arg, _T("jitevent")) && np) {
+		pissoff_value = core_arg_value(np) * CYCLE_UNIT;
+		return 2;
+	}
+
+	if (!_tcscmp(arg, _T("cpuevent")) && np) {
+		pissoff_nojit_value = core_arg_value(np) * CYCLE_UNIT;
+		return 2;
+	}
+
+	if (!_tcscmp (arg, _T("inputrecorddebug")) && np) {
+		inputrecord_debug = core_arg_value (np);
+		return 2;
+	}
+
+	if (!_tcscmp(arg, _T("conlogfile")) && np) {
+		conlogfile = my_strdup(np);
+		return 2;
+	}
+	return 0;
+}
+#else
+/* libretro starts the core without command line arguments */
+int parse_core_arg(const TCHAR *argx, const TCHAR *np, const TCHAR *np2)
+{
+	return 0;
+}
+#endif /* __LIBRETRO__ */
 
 #ifndef DONT_PARSE_CMDLINE
 
@@ -983,6 +1257,35 @@ static void parse_cmdline (int argc, TCHAR **argv)
 	started = true;
 
 	for (i = 1; i < argc; i++) {
+		int consumed = argv[i][0] == '-'
+			? parse_core_arg(argv[i], i + 1 < argc ? argv[i + 1] : NULL,
+				i + 2 < argc ? argv[i + 2] : NULL) : 0;
+		if (consumed < 0) {
+			exit(0);
+		}
+		if (consumed > 0) {
+			i += consumed - 1;
+			continue;
+		}
+		if (_tcsncmp(argv[i], _T("-cli="), 5) == 0 || _tcsncmp(argv[i], _T("--cli="), 6) == 0) {
+			console_emulation = 1;
+			TCHAR *path = _tcschr(argv[i], _T('=')) + 1;
+			if (path && path[0]) {
+				_tcsncpy(console_path, path, MAX_DPATH - 1);
+				console_path[MAX_DPATH - 1] = 0;
+			}
+			continue;
+		}
+		if (_tcscmp(argv[i], _T("-cli")) == 0 || _tcscmp(argv[i], _T("--cli")) == 0) {
+			console_emulation = 1;
+			// Check if next argument is a path (not starting with '-')
+			if (i + 1 < argc && argv[i + 1][0] != _T('-')) {
+				i++;
+				_tcsncpy(console_path, argv[i], MAX_DPATH - 1);
+				console_path[MAX_DPATH - 1] = 0;
+			}
+			continue;
+		}
 		if (!_tcsncmp (argv[i], _T("-diskswapper="), 13)) {
 			TCHAR *txt = parsetextpath (argv[i] + 13);
 			parse_diskswapper (txt);
@@ -1199,7 +1502,7 @@ static int real_main2 (int argc, TCHAR **argv)
 
 #ifndef __LIBRETRO__
 	if (console_emulation) {
-		consolehook_config (&currprefs);
+		consolehook_config (&currprefs, console_path[0] ? console_path : NULL);
 		fixup_prefs (&currprefs, true);
 	}
 #endif
@@ -1270,7 +1573,9 @@ static int real_main2 (int argc, TCHAR **argv)
 	/* force sound settings change */
 	currprefs.produce_sound = 0;
 
+#ifdef SAVESTATE
 	savestate_init ();
+#endif
 	keybuf_init (); /* Must come after init_joystick */
 
 #ifdef DEBUGGER
@@ -1362,7 +1667,12 @@ int umain (int argc, TCHAR **argv)
 int main (int argc, TCHAR **argv)
 #endif
 {
+	target_main_set_args(argc, argv);
+	const int early_exit = target_main_handle_early(argc, argv);
+	if (early_exit >= 0)
+		return early_exit;
 	real_main (argc, argv);
+	target_main_exit();
 	return 0;
 }
 #endif
@@ -1409,6 +1719,8 @@ extern void libretro_do_restart (int argc, TCHAR **argv)
 
 	if (restart_program)
 	{
+		extern void custom_poweron_beam(void);
+		custom_poweron_beam();
 		copy_prefs(&currprefs, &changed_prefs);
 		real_main2_ret = real_main2 (argc, argv);
 	}

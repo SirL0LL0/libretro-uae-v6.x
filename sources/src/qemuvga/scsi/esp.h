@@ -12,6 +12,7 @@ void esp_init(hwaddr espaddr, int it_shift,
 
 #define ESP_REGS 16
 #define TI_BUFSZ 16
+#define ESP_CMDBUF_SZ 32
 
 typedef struct ESPState ESPState;
 
@@ -31,8 +32,11 @@ struct ESPState {
     SCSIBus bus;
     SCSIDevice *current_dev;
     SCSIRequest *current_req;
-    uint8_t cmdbuf[TI_BUFSZ];
+    uint8_t cmdbuf[ESP_CMDBUF_SZ];
     uint32_t cmdlen;
+    // Select (with ATN) command bytes. Pseudo DMA keeps the destination
+    // pointer until the transfer completes, so this can't live on the stack.
+    uint8_t selbuf[ESP_CMDBUF_SZ];
     uint32_t do_cmd;
 
     /* The amount of data left in the current DMA transfer.  */
@@ -179,14 +183,14 @@ register 0x0d is set.  This bit is common to both register sets.
 
 #define	NCR_SIGNTR	0x0e		/* RO - Signature */
 
-#ifndef __LIBRETRO__
+#ifdef __cplusplus /* never defined: C++ overloads of the void * versions below */
 void esp_dma_enable(ESPState *s, int irq, int level);
 #endif
 void esp_request_cancelled(SCSIRequest *req);
 void esp_command_complete(SCSIRequest *req, uint32_t status, size_t resid);
 void esp_transfer_data(SCSIRequest *req, uint32_t len);
 void esp_hard_reset(ESPState *s);
-#ifndef __LIBRETRO__
+#ifdef __cplusplus
 uint64_t esp_reg_read(ESPState *s, uint32_t saddr);
 void esp_reg_write(ESPState *s, uint32_t saddr, uint64_t val);
 #endif

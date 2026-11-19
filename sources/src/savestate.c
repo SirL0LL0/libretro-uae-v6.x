@@ -52,19 +52,19 @@
 #include "options.h"
 #include "memory.h"
 #include "zfile.h"
-#include "ar.h"
 #include "autoconf.h"
 #include "custom.h"
 #include "newcpu.h"
 #include "savestate.h"
+#ifdef __LIBRETRO__
+#include "cpuboard.h"
+#endif
 #include "uae.h"
 #include "gui.h"
 #include "audio.h"
 #include "filesys.h"
 #include "inputrecord.h"
 #include "disk.h"
-#include "threaddep/thread.h"
-#include "a2091.h"
 #include "devices.h"
 #include "fsdb.h"
 #include "gfxboard.h"
@@ -75,6 +75,7 @@ extern struct zfile *retro_deserialize_file;
 #endif
 
 int savestate_state = 0;
+int savestate_last_save_result = -1;
 static int savestate_first_capture;
 
 static bool new_blitter = false;
@@ -82,9 +83,18 @@ static bool new_blitter = false;
 static int replaycounter;
 
 struct zfile *savestate_file;
-static int savestate_docompress, savestate_specialdump, savestate_nodialogs;
+
+#define SAVESTATE_DOCOMPRESS 1
+#define SAVESTATE_NODIALOGS 2
+#define SAVESTATE_SPECIALDUMP1 4
+#define SAVESTATE_SPECIALDUMP2 8
+#define SAVESTATE_ALWAYSUSEPATH 16
+#define SAVESTATE_SPECIALDUMP (SAVESTATE_SPECIALDUMP1 | SAVESTATE_SPECIALDUMP2)
+static int savestate_flags;
+static uae_u32 statefile_version;
 
 TCHAR savestate_fname[MAX_DPATH];
+TCHAR path_statefile[MAX_DPATH];
 
 #ifndef __LIBRETRO__
 #define STATEFILE_ALLOC_SIZE 600000
@@ -153,7 +163,8 @@ bool is_savestate_incompatible(void)
 /* functions for reading/writing bytes, shorts and longs in big-endian
 * format independent of host machine's endianness */
 
-static uae_u8 *storepos;
+static uae_u8 *chunk_start, *storepos;
+static unsigned int chunk_totallen;
 void save_store_pos_func(uae_u8 **dstp)
 {
 	storepos = *dstp;
@@ -291,6 +302,10 @@ TCHAR *restore_string_func (uae_u8 **dstp)
 	s = utf8u (to);
 	xfree (to);
 	return s;
+}
+bool restore_data_valid_func(uae_u8 **dstp)
+{
+	return *dstp < chunk_start + chunk_totallen;
 }
 
 static bool state_path_exists(const TCHAR *path, int type)
@@ -527,6 +542,10 @@ static uae_u8 *restore_chunk (struct zfile *f, TCHAR *name, unsigned int *len, u
 		&& _tcscmp(name, _T("A3K1")) != 0
 		&& _tcscmp(name, _T("A3K2")) != 0
 		&& _tcscmp(name, _T("BORO")) != 0
+#ifdef __LIBRETRO__
+		&& _tcscmp(name, _T("M25B")) != 0
+		&& _tcsncmp(name, _T("CBR"), 3) != 0
+#endif
 	)
 	{
 		/* extra bytes at the end needed to handle old statefiles that now have new fields */
@@ -586,6 +605,11 @@ static uae_u8 *restore_log (uae_u8 *src)
 	return src;
 }
 
+uae_u32 get_statefile_version(void)
+{
+	return statefile_version;
+}
+
 static void restore_header (uae_u8 *src)
 {
 	TCHAR *emuname, *emuversion, *description;
@@ -596,6 +620,21 @@ static void restore_header (uae_u8 *src)
 	description = restore_string ();
 	write_log (_T("Saved with: '%s %s', description: '%s'\n"),
 		emuname, emuversion, description);
+
+	statefile_version = 0;
+	TCHAR *tmpp = _tcschr(emuversion, '.');
+	if (tmpp) {
+		*tmpp++ = 0;
+		TCHAR *tmpp2 = tmpp;
+		statefile_version = _tstol(emuversion) << 16;
+		tmpp = _tcschr(tmpp, '.');
+		if (tmpp) {
+			*tmpp++ = 0;
+			statefile_version |= _tstol(tmpp2) << 8;
+			statefile_version |= _tstol(tmpp);
+		}
+	}
+
 	xfree (description);
 	xfree (emuversion);
 	xfree (emuname);
@@ -654,6 +693,7 @@ void restore_state (const TCHAR *filename)
 	restore_header (chunk);
 	xfree (chunk);
 	devices_restore_start();
+	set_cycles(0);
 	clear_events();
 	z2num = z3num = 0;
 	for (;;) {
@@ -662,6 +702,8 @@ void restore_state (const TCHAR *filename)
 #if OPEN_LOG > 0
 		write_log (_T("Chunk '%s' size %u (%u)\n"), name, len, totallen);
 #endif
+		chunk_totallen = totallen;
+		chunk_start = chunk;
 		if (!_tcscmp (name, _T("END "))) {
 			if (end_found)
 				break;
@@ -692,6 +734,14 @@ void restore_state (const TCHAR *filename)
 			continue;
 		} else if (!_tcscmp (name, _T("BORO"))) {
 			restore_bootrom (totallen, filepos);
+			continue;
+#endif
+#ifdef __LIBRETRO__
+		} else if (!_tcscmp (name, _T("M25B"))) {
+			restore_mem25bitram (totallen, filepos);
+			continue;
+		} else if (!_tcsncmp (name, _T("CBR"), 3) && name[3] >= '0' && name[3] <= '2') {
+			restore_cpuboard_ram (name[3] - '0', filepos);
 			continue;
 #endif
 #ifdef PICASSO96
@@ -731,8 +781,10 @@ void restore_state (const TCHAR *filename)
 			end = restore_custom_sprite (5, chunk);
 		else if (!_tcscmp (name, _T("SPR6")))
 			end = restore_custom_sprite (6, chunk);
-		else if (!_tcscmp (name, _T("SPR7")))
-			end = restore_custom_sprite (7, chunk);
+		else if (!_tcscmp(name, _T("SPR7")))
+			end = restore_custom_sprite(7, chunk);
+		else if (!_tcscmp(name, _T("BPLX")))
+			end = restore_custom_bpl(chunk);
 		else if (!_tcscmp (name, _T("CIAA")))
 			end = restore_cia (0, chunk);
 		else if (!_tcscmp (name, _T("CIAB")))
@@ -779,6 +831,12 @@ void restore_state (const TCHAR *filename)
 			end = restore_disk2 (3, chunk);
 		else if (!_tcscmp (name, _T("KEYB")))
 			end = restore_keyboard (chunk);
+		else if (!_tcscmp (name, _T("KBM1")))
+			end = restore_kbmcu(chunk);
+		else if (!_tcscmp (name, _T("KBM2")))
+			end = restore_kbmcu2(chunk);
+		else if (!_tcscmp (name, _T("KBM3")))
+			end = restore_kbmcu3(chunk);
 #ifdef AUTOCONFIG
 		else if (!_tcscmp (name, _T("EXPA")))
 			end = restore_expansion (chunk);
@@ -939,7 +997,7 @@ bool savestate_restore_finish(void)
 	restore_debug_memwatch_finish();
 #endif
 	savestate_state = 0;
-	init_hz_normal();
+	init_hz();
 	audio_activate();
 	return true;
 }
@@ -947,17 +1005,15 @@ bool savestate_restore_finish(void)
 /* 1=compressed,2=not compressed,3=ram dump,4=audio dump */
 void savestate_initsave (const TCHAR *filename, int mode, int nodialogs, bool save)
 {
+	savestate_flags = 0;
 	if (filename == NULL) {
 		savestate_fname[0] = 0;
-		savestate_docompress = 0;
-		savestate_specialdump = 0;
-		savestate_nodialogs = 0;
 		return;
 	}
 	_tcscpy (savestate_fname, filename);
-	savestate_docompress = (mode == 1) ? 1 : 0;
-	savestate_specialdump = (mode == 3) ? 1 : (mode == 4) ? 2 : 0;
-	savestate_nodialogs = nodialogs;
+	savestate_flags |= (mode == 1) ? SAVESTATE_DOCOMPRESS : 0;
+	savestate_flags |= (mode == 3) ? SAVESTATE_SPECIALDUMP1 : (mode == 4) ? SAVESTATE_SPECIALDUMP2 : 0;
+	savestate_flags |= nodialogs ? SAVESTATE_NODIALOGS : 0;
 	new_blitter = false;
 	if (save) {
 		savestate_free ();
@@ -991,6 +1047,16 @@ static void save_rams (struct zfile *f, int comp)
 	save_chunk (f, dst, len, _T("ZCRM"), comp);
 	dst = save_bootrom (&len);
 	save_chunk (f, dst, len, _T("BORO"), comp);
+#endif
+#ifdef __LIBRETRO__
+	/* accelerator board RAM (not saved upstream) */
+	dst = save_mem25bitram(&len);
+	save_chunk(f, dst, len, _T("M25B"), comp);
+	for (int i = 0; i < 3; i++) {
+		TCHAR cname[5] = { 'C', 'B', 'R', (TCHAR)('0' + i), 0 };
+		dst = save_cpuboard_ram(i, &len);
+		save_chunk(f, dst, len, cname, comp);
+	}
 #endif
 #ifdef PICASSO96
 	dst = save_pram (&len);
@@ -1106,6 +1172,11 @@ static int save_state_internal (struct zfile *f, const TCHAR *description, int c
 		xfree(dst);
 	}
 
+	dst = save_custom_bpl(&len, NULL);
+	if (dst) {
+		save_chunk(f, dst, len, _T("BPLX"), 0);
+		xfree(dst);
+	}
 	_tcscpy (name, _T("SPRx"));
 	for (i = 0; i < 8; i++) {
 		dst = save_custom_sprite (i, &len, 0);
@@ -1132,6 +1203,16 @@ static int save_state_internal (struct zfile *f, const TCHAR *description, int c
 
 	dst = save_keyboard (&len, NULL);
 	save_chunk (f, dst, len, _T("KEYB"), 0);
+	xfree (dst);
+
+	dst = save_kbmcu(&len, NULL);
+	save_chunk(f, dst, len, _T("KBM1"), 0);
+	xfree (dst);
+	dst = save_kbmcu2(&len, NULL);
+	save_chunk(f, dst, len, _T("KBM2"), 0);
+	xfree (dst);
+	dst = save_kbmcu3(&len, NULL);
+	save_chunk(f, dst, len, _T("KBM3"), 0);
 	xfree (dst);
 
 #ifdef AUTOCONFIG
@@ -1187,9 +1268,11 @@ static int save_state_internal (struct zfile *f, const TCHAR *description, int c
 	save_chunk (f, dst, len, _T("CD32"), 0);
 	xfree (dst);
 #endif
+#ifdef ARCADIA
 	dst = save_alg(&len);
 	save_chunk(f, dst, len, _T("ALG "), 0);
 	xfree(dst);
+#endif
 #ifdef CDTV
 	dst = save_cdtv (&len, NULL);
 	save_chunk (f, dst, len, _T("CDTV"), 0);
@@ -1318,12 +1401,15 @@ int save_state (const TCHAR *filename, const TCHAR *description)
 	struct zfile *f;
 #ifdef __LIBRETRO__
 	int comp = 0;
-	savestate_nodialogs = 1;
+	/* Frontend-driven serialization: never show dialogs or refuse because of
+	 * mounted filesystems (was "savestate_nodialogs = 1" before upstream
+	 * folded these switches into savestate_flags). */
+	savestate_flags |= SAVESTATE_NODIALOGS;
 #else
-	int comp = savestate_docompress;
+	int comp = (savestate_flags & SAVESTATE_DOCOMPRESS) != 0;
 #endif
 
-	if (!savestate_specialdump && !savestate_nodialogs) {
+	if (!(savestate_flags & SAVESTATE_SPECIALDUMP) && !(savestate_flags & SAVESTATE_NODIALOGS)) {
 		if (is_savestate_incompatible()) {
 			static int warned;
 			if (!warned) {
@@ -1333,6 +1419,7 @@ int save_state (const TCHAR *filename, const TCHAR *description)
 		}
 		if (!save_filesys_cando ()) {
 			gui_message (_T("Filesystem active. Try again later."));
+			savestate_state = 0;
 #ifdef __LIBRETRO__
 			return NULL;
 #else
@@ -1341,26 +1428,29 @@ int save_state (const TCHAR *filename, const TCHAR *description)
 		}
 	}
 	new_blitter = false;
-	savestate_nodialogs = 0;
-	custom_prepare_savestate ();
+	savestate_flags &= ~SAVESTATE_NODIALOGS;
+	custom_prepare_savestate();
 #ifdef __LIBRETRO__
 	f = zfile_fopen_empty (NULL, description, size);
 #else
 	f = zfile_fopen (filename, _T("w+b"), 0);
 #endif
-	if (!f)
+	if (!f) {
+		savestate_state = 0;
 #ifdef __LIBRETRO__
 		return NULL;
 #else
 		return 0;
 #endif
-	if (savestate_specialdump) {
+	}
+	if (savestate_flags & SAVESTATE_SPECIALDUMP) {
 		size_t pos;
-		if (savestate_specialdump == 2)
+		if (savestate_flags & SAVESTATE_SPECIALDUMP2) {
 			write_wavheader (f, 0, 22050);
+		}
 		pos = zfile_ftell32(f);
 		save_rams (f, -1);
-		if (savestate_specialdump == 2) {
+		if (savestate_flags & SAVESTATE_SPECIALDUMP2) {
 			size_t len, len2, i;
 			uae_u8 *tmp;
 			len = zfile_ftell32(f) - pos;
@@ -1377,8 +1467,7 @@ int save_state (const TCHAR *filename, const TCHAR *description)
 		zfile_fseek (f, 0, SEEK_SET);
 		return f;
 #else
-		zfile_fclose (f);
-		return 1;
+		return zfile_fclose(f) ? 0 : 1;
 #endif
 	}
 	int v = save_state_internal (f, description, comp, true);
@@ -1391,12 +1480,15 @@ int save_state (const TCHAR *filename, const TCHAR *description)
 	savestate_state = 0;
 	return f;
 #else
-#if OPEN_LOG > 0
-	if (v)
-		write_log (_T("Save of '%s' complete\n"), filename);
-#endif
-	zfile_fclose (f);
-	DISK_history_add(filename, -1, HISTORY_STATEFILE, 0);
+	bool failed = zfile_ferror(f) != 0;
+	if (zfile_fclose(f))
+		failed = true;
+	if (failed)
+		v = 0;
+	if (v) {
+		write_log(_T("Save of '%s' complete\n"), filename);
+		DISK_history_add(filename, -1, HISTORY_STATEFILE, 0);
+	}
 	savestate_state = 0;
 	return v;
 #endif
@@ -1405,26 +1497,34 @@ int save_state (const TCHAR *filename, const TCHAR *description)
 #ifndef __LIBRETRO__
 void savestate_quick (int slot, int save)
 {
+	if (path_statefile[0]) {
+		_tcscpy(savestate_fname, path_statefile);
+	}
 	int i, len = uaetcslen(savestate_fname);
 	i = len - 1;
-	while (i >= 0 && savestate_fname[i] != '_')
+	while (i >= 0 && savestate_fname[i] != '_') {
 		i--;
+	}
 	if (i < len - 6 || i <= 0) { /* "_?.uss" */
 		i = len - 1;
-		while (i >= 0 && savestate_fname[i] != '.')
+		while (i >= 0 && savestate_fname[i] != '.') {
 			i--;
+		}
 		if (i <= 0) {
 			write_log (_T("savestate name skipped '%s'\n"), savestate_fname);
 			return;
 		}
 	}
 	_tcscpy (savestate_fname + i, _T(".uss"));
-	if (slot > 0)
+	if (slot > 0) {
 		_stprintf (savestate_fname + i, _T("_%d.uss"), slot);
+	}
+	savestate_flags = 0;
 	if (save) {
 		write_log (_T("saving '%s'\n"), savestate_fname);
-		savestate_docompress = 1;
-		savestate_nodialogs = 1;
+		savestate_flags |= SAVESTATE_DOCOMPRESS;
+		savestate_flags |= SAVESTATE_NODIALOGS;
+		savestate_flags |= SAVESTATE_ALWAYSUSEPATH;
 		save_state (savestate_fname, _T(""));
 	} else {
 		if (!zfile_exists (savestate_fname)) {
@@ -1432,6 +1532,7 @@ void savestate_quick (int slot, int save)
 			return;
 		}
 		savestate_state = STATE_DORESTORE;
+		savestate_flags |= SAVESTATE_ALWAYSUSEPATH;
 		write_log (_T("staterestore starting '%s'\n"), savestate_fname);
 	}
 }
@@ -1455,8 +1556,9 @@ bool savestate_check(void)
 	} else if (savestate_state == STATE_SAVE) {
 #ifndef __LIBRETRO__
 		savestate_initsave(savestate_fname, 1, true, true);
-		save_state(savestate_fname, STATE_SAVE_DESCRIPTION);
+		savestate_last_save_result = save_state(savestate_fname, STATE_SAVE_DESCRIPTION);
 #endif
+		savestate_state = 0;
 		return false;
 	}
 	return false;

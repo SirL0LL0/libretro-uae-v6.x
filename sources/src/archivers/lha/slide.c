@@ -98,7 +98,7 @@ static unsigned short hash1, hash2;
 
 #define HSHSIZ (((unsigned long)1) <<15)
 #define NIL 0
-#define LIMIT 0x100	/* chain ￄﾹﾤￎ limit */
+#define LIMIT 0x100	/* chain Ĺ�� limit */
 
 static unsigned int txtsiz;
 
@@ -150,7 +150,7 @@ encode_alloc(method)
 }
 
 /* ------------------------------------------------------------------------ */
-/* ﾥ￝ﾥﾤﾥ￳ﾥ﾿ﾤￎﾽ￩ﾴ￼ﾲﾽ */
+/* �ݥ��󥿤ν���� */
 
 static void init_slide()
 {
@@ -167,7 +167,7 @@ static void init_slide()
 	*/
 }
 
-/* ﾼﾭﾽ￱ﾤ￲ DICSIZ ￊﾬ ￁ﾰﾤￋﾤﾺﾤ￩ﾤﾹ */
+/* ����� DICSIZ ʬ ���ˤ��餹 */
 
 static void update()
 {
@@ -205,7 +205,7 @@ static void update()
 }
 
 
-/* ﾸﾽﾺ￟ﾤￎￊﾸﾻ￺ￎ￳ﾤ￲ﾥ￁ﾥﾧﾡﾼﾥ￳ﾤￋￄ￉ﾲￃﾤﾹﾤ￫ */
+/* �ݥ��󥿤ν���� */
 
 static void insert()
 {
@@ -214,7 +214,7 @@ static void insert()
 }
 
 
-/* ﾸﾽﾺ￟ﾤￎￊﾸﾻ￺ￎ￳ﾤ￈ﾺￇￄﾹﾰ￬ￃￗﾤﾹﾤ￫ￊﾸﾻ￺ￎ￳ﾤ￲ﾸﾡﾺ￷ﾤﾷﾡﾢﾥ￁ﾥﾧﾡﾼﾥ￳ﾤￋￄ￉ﾲￃﾤﾹﾤ￫ */
+/* �ݥ��󥿤ν���� */
 
 static void match_insert()
 {
@@ -276,7 +276,7 @@ static void match_insert()
 }
 
 
-/* ﾥ￝ﾥﾤﾥ￳ﾥ﾿ﾤ￲﾿ￊﾤ￡ﾡﾢﾼﾭﾽ￱ﾤ￲ﾹﾹ﾿ﾷﾤﾷﾡﾢﾥￏﾥￃﾥﾷﾥ￥ￃￍﾤ￲ﾹﾹ﾿ﾷﾤﾹﾤ￫ */
+/* �ݥ��󥿤ν���� */
 
 static void get_next()
 {

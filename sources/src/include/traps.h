@@ -14,6 +14,25 @@
 #define UAE_TRAPS_H
 
 #include "uae/types.h"
+#ifdef __cplusplus
+#include <atomic>
+/* uaeboard indirect traps: host threads and the emulation thread hand trap parameters, results and
+ * registers over through plain rtarea memory and signal with a status byte. On a weakly ordered host
+ * (arm64) the status byte can become visible before the data written ahead of it, and the reader can
+ * load the data ahead of the status byte, so both sides fence around the hand-over. */
+static inline void trap_fence(void)
+{
+	std::atomic_thread_fence(std::memory_order_seq_cst);
+}
+#else
+#include <stdint.h>
+/* libretro builds the core as C99: use the compiler builtin memory barrier instead of
+ * the C++ <atomic> based fence used by the upstream (C++) build. */
+static inline void trap_fence(void)
+{
+	__sync_synchronize();
+}
+#endif
 
 
 #define TRAPCMD_MULTI 0

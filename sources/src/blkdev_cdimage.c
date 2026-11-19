@@ -19,7 +19,6 @@
 #endif
 
 #include "options.h"
-#include "traps.h"
 #include "blkdev.h"
 #include "zfile.h"
 #include "gui.h"
@@ -33,7 +32,6 @@
 #include "memory.h"
 #include "audio.h"
 #include "uae.h"
-#include "uae/cdrom.h"
 #ifdef RETROPLATFORM
 #include "rp.h"
 #endif
@@ -119,7 +117,7 @@ struct cdunit {
 	cdrom_file *chd_cdf;
 #endif
 	volatile int cda_bufon[2];
-	cda_audio *cda;
+	cda_audio_t *cda;
 	struct cd_audio_state cas;
 };
 
@@ -477,11 +475,7 @@ static void next_cd_audio_buffer_callback(int bufnum, void *params)
 		cdu->cda_bufon[bufnum] = 0;
 		bufnum = 1 - bufnum;
 		if (cdu->cda_bufon[bufnum])
-#ifdef __LIBRETRO__
-			audio_cda_new_buffer(&cdu->cas, (uae_s16*)cda_audio_buffers[bufnum], CDDA_BUFFERS * 2352 / 4, bufnum, next_cd_audio_buffer_callback, cdu);
-#else
 			audio_cda_new_buffer(&cdu->cas, (uae_s16*)cdu->cda->buffers[bufnum], CDDA_BUFFERS * 2352 / 4, bufnum, next_cd_audio_buffer_callback, cdu);
-#endif
 		else
 			bufnum = -1;
 	}
@@ -513,11 +507,9 @@ static bool cdda_play_func2 (struct cdunit *cdu, int *outpos)
 	cdu->cda_bufon[0] = cdu->cda_bufon[1] = 0;
 	bufnum = 0;
 
-#ifdef __LIBRETRO__
-	cda_new (CDDA_BUFFERS, 2352, 44100);
-#else
-	cdu->cda = new cda_audio (CDDA_BUFFERS, 2352, 44100);
-#endif
+	cdu->cda = xcalloc(cda_audio_t, 1);
+	if (cdu->cda)
+		cda_audio_init(cdu->cda, CDDA_BUFFERS, 2352, 44100);
 
 	while (cdu->cdda_play > 0) {
 
@@ -647,18 +639,10 @@ static bool cdda_play_func2 (struct cdunit *cdu, int *outpos)
 
 			cdu_setstate(cdu, AUDIO_STATUS_IN_PROGRESS, cdda_pos);
 
-#ifdef __LIBRETRO__
-			memset (cda_audio_buffers[bufnum], 0, CDDA_BUFFERS * 2352);
-#else
 			memset (cdu->cda->buffers[bufnum], 0, CDDA_BUFFERS * 2352);
-#endif
 
 			for (cnt = 0; cnt < CDDA_BUFFERS && cdu->cdda_play > 0; cnt++) {
-#ifdef __LIBRETRO__
-				uae_u8 *dst = cda_audio_buffers[bufnum] + cnt * 2352;
-#else
 				uae_u8 *dst = cdu->cda->buffers[bufnum] + cnt * 2352;
-#endif
 				uae_u8 subbuf[SUB_CHANNEL_SIZE];
 				sector = cdda_pos;
 
@@ -776,11 +760,11 @@ end:
 	while (cdimage_unpack_active == 1)
 		sleep_millis(10);
 
-#ifdef __LIBRETRO__
-	cda_delete();
-#else
-	delete cdu->cda;
-#endif
+	if (cdu->cda) {
+		cda_audio_free(cdu->cda);
+		xfree(cdu->cda);
+		cdu->cda = NULL;
+	}
 
 	write_log (_T("IMAGE CDDA: thread killed (%s)\n"), restart ? _T("restart") : _T("play end"));
 	cd_audio_mode_changed = false;
@@ -989,6 +973,20 @@ static int command_rawread (int unitnum, uae_u8 *data, int sector, int size, int
 					memcpy(data - SUBQ_SIZE, subs + SUBQ_SIZE, SUBQ_SIZE);
 }
 			}
+		} else if (sectorsize == 2340 && t->size == 2336) {
+			// 2336 -> 2340
+			while (size-- > 0) {
+				int address = asector + 150;
+				data[0] = tobcd((uae_u8)(address / (60 * 75)));
+				data[1] = tobcd((uae_u8)((address / 75) % 60));
+				data[2] = tobcd((uae_u8)(address % 75));
+				data[3] = 2; /* MODE2 */
+				do_read(cdu, t, data + 4, sector, 0, t->size, false);
+				sector++;
+				asector++;
+				data += sectorsize;
+				ret += sectorsize;
+			}
 		} else if ((sectorsize == 2352 || sectorsize == 2368 || sectorsize == 2448) && t->size == 2048) {
 			// 2048 -> 2352
 			while (size-- > 0) {
@@ -1009,12 +1007,42 @@ static int command_rawread (int unitnum, uae_u8 *data, int sector, int size, int
 					memcpy(data - SUBQ_SIZE, subs + SUBQ_SIZE, SUBQ_SIZE);
 				}
 			}
+		} else if (sectorsize == 2052 && t->size == 2048) {
+			// 2048 -> 2052
+			while (size-- > 0) {
+				int address = asector + 150;
+				data[0] = tobcd((uae_u8)(address / (60 * 75)));
+				data[1] = tobcd((uae_u8)((address / 75) % 60));
+				data[2] = tobcd((uae_u8)(address % 75));
+				data[3] = 0; /* MODE1 */
+				do_read(cdu, t, data + 4, sector, 0, sectorsize - 4, false);
+				sector++;
+				asector++;
+				data += sectorsize;
+				ret += sectorsize;
+			}
 		} else if (sectorsize == 2048 && t->size == 2352) {
 			// 2352 -> 2048
 			while (size-- > 0) {
 				uae_u8 b = 0;
-				do_read (cdu, t, &b, sector, 15, 1, false);
-				do_read (cdu, t, data, sector, b == 2 ? 24 : 16, sectorsize, false);
+				do_read(cdu, t, &b, sector, 15, 1, false);
+				do_read(cdu, t, data, sector, b == 2 ? 24 : 16, sectorsize, false);
+				sector++;
+				asector++;
+				data += sectorsize;
+				ret += sectorsize;
+			}
+		} else if (sectorsize == 2052 && t->size == 2352) {
+			// 2352 -> 2052
+			while (size-- > 0) {
+				uae_u8 b = 0;
+				do_read(cdu, t, &b, sector, 15, 1, false);
+				int address = asector + 150;
+				data[0] = tobcd((uae_u8)(address / (60 * 75)));
+				data[1] = tobcd((uae_u8)((address / 75) % 60));
+				data[2] = tobcd((uae_u8)(address % 75));
+				data[3] = b;
+				do_read(cdu, t, data + 4, sector, b == 2 ? 24 : 16, sectorsize - 4, false);
 				sector++;
 				asector++;
 				data += sectorsize;
@@ -1024,10 +1052,28 @@ static int command_rawread (int unitnum, uae_u8 *data, int sector, int size, int
 			// 2352 -> 2336
 			while (size-- > 0) {
 				uae_u8 b = 0;
-				do_read (cdu, t, &b, sector, 15, 1, false);
+				do_read(cdu, t, &b, sector, 15, 1, false);
 				if (b != 2 && b != 0) // MODE0 or MODE2 only allowed
 					return 0;
-				do_read (cdu, t, data, sector, 16, sectorsize, false);
+				do_read(cdu, t, data, sector, 16, sectorsize, false);
+				sector++;
+				asector++;
+				data += sectorsize;
+				ret += sectorsize;
+			}
+		} else if (sectorsize == 2340 && t->size == 2352) {
+			// 2352 -> 2340
+			while (size-- > 0) {
+				uae_u8 b = 0;
+				do_read(cdu, t, &b, sector, 15, 1, false);
+				if (b != 2 && b != 0) // MODE0 or MODE2 only allowed
+					return 0;
+				int address = asector + 150;
+				data[0] = tobcd((uae_u8)(address / (60 * 75)));
+				data[1] = tobcd((uae_u8)((address / 75) % 60));
+				data[2] = tobcd((uae_u8)(address % 75));
+				data[3] = b;
+				do_read(cdu, t, data + 4, sector, 16, sectorsize - 4, false);
 				sector++;
 				asector++;
 				data += sectorsize;
@@ -1765,7 +1811,13 @@ static int parsecue (struct cdunit *cdu, struct zfile *zcue, const TCHAR *img, c
 			index0 = -1;
 			lastpregap = 0;
 			lastpostgap = 0;
+			skipspace(&p);
+			TCHAR *pt = p;
 			tracknum = _tstoi (nextstring (&p));
+			// fix broken "TRACK 0"
+			if (tracknum == 0 && pt[0] == '0' && pt[1] == 0 && cdu->tracks == 0) {
+				tracknum = 1;
+			}
 			tracktype = nextstring (&p);
 			if (!tracktype)
 				break;
@@ -1792,7 +1844,9 @@ static int parsecue (struct cdunit *cdu, struct zfile *zcue, const TCHAR *img, c
 
 				if (tracknum > 1 && newfile) {
 					t--;
-					secoffset += (int)(t->filesize / t->size);
+					if (t->size) {
+						secoffset += (int)(t->filesize / t->size);
+					}
 					t++;
 				}
 

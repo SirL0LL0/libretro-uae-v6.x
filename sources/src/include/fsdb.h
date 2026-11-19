@@ -179,6 +179,7 @@ extern int my_rmdir (const TCHAR*);
 extern int my_mkdir (const TCHAR*);
 extern int my_unlink (const TCHAR*, bool);
 extern int my_rename (const TCHAR*, const TCHAR*);
+extern bool my_getcurrentdir(TCHAR *path, int size);
 extern int my_setcurrentdir (const TCHAR *curdir, TCHAR *oldcur);
 bool my_isfilehidden (const TCHAR *path);
 void my_setfilehidden (const TCHAR *path, bool hidden);
@@ -211,6 +212,7 @@ extern bool my_issamepath(const TCHAR *path1, const TCHAR *path2);
 extern bool my_createsoftlink(const TCHAR *path, const TCHAR *target);
 extern bool my_createshortcut(const TCHAR *source, const TCHAR *target, const TCHAR *description);
 extern void makesafefilename(TCHAR*, bool);
+extern bool my_existsfiledir(const TCHAR *name);
 
 extern a_inode *custom_fsdb_lookup_aino_aname (a_inode *base, const TCHAR *aname);
 extern a_inode *custom_fsdb_lookup_aino_nname (a_inode *base, const TCHAR *nname);

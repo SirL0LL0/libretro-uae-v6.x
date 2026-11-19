@@ -17,21 +17,21 @@
 #include "uae.h"
 #include "memory.h"
 #include "rommgr.h"
-#include "custom.h"
 #include "newcpu.h"
 #include "ncr9x_scsi.h"
 #include "scsi.h"
 #include "filesys.h"
 #include "zfile.h"
-#include "blkdev.h"
 #include "cpuboard.h"
 #include "flashrom.h"
 #include "autoconf.h"
+/* libretro: the 53C9x core (qemuvga/esp.c) is built without the rest of QEMU */
+#if defined(WITH_QEMU_CPU) || defined(__LIBRETRO__)
 #include "qemuvga/qemuuaeglue.h"
 #include "qemuvga/queue.h"
 #include "qemuvga/scsi/scsi.h"
 #include "qemuvga/scsi/esp.h"
-#include "gui.h"
+#endif
 #include "devices.h"
 
 #define FASTLANE_BOARD_SIZE (2 * 16777216)

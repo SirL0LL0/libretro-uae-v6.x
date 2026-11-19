@@ -14,9 +14,7 @@
 
 #include "traps.h"
 
-#define UAEMAJOR 5
-#define UAEMINOR 3
-#define UAESUBREV 1
+#include "winuae_version.h"
 
 #define MAX_AMIGADISPLAYS 4
 
@@ -279,6 +277,10 @@ enum { CP_GENERIC = 1, CP_CDTV, CP_CDTVCR, CP_CD32, CP_A500, CP_A500P, CP_A600,
 #define AUTOSCALE_SEPARATOR 10
 #define AUTOSCALE_OVERSCAN_BLANK 11
 
+#define MANUAL_SCALE_MIN_RANGE -1999
+#define MANUAL_SCALE_MAX_RANGE 1999
+#define MANUAL_FILTER_MAX_RANGE 9999
+
 #define MONITOREMU_NONE 0
 #define MONITOREMU_AUTO 1
 #define MONITOREMU_A2024 2
@@ -368,6 +370,11 @@ struct apmode
 
 #define MAX_LUA_STATES 16
 
+#define ASPECT_TYPE_NONE 0
+#define ASPECT_TYPE_VGA 1
+#define ASPECT_TYPE_TV_AUTO 2
+#define ASPECT_TYPE_TV_PAL 3
+#define ASPECT_TYPE_TV_NTSC 4
 
 #define MAX_FILTERDATA 3
 #define GF_NORMAL 0
@@ -396,11 +403,12 @@ struct gfx_filterdata
 	int gfx_filter_noise, gfx_filter_blur;
 	int gfx_filter_saturation, gfx_filter_luminance, gfx_filter_contrast;
 	int gfx_filter_gamma, gfx_filter_gamma_ch[3];
-	int gfx_filter_keep_aspect, gfx_filter_aspect;
+	int gfx_filter_aspect_type, gfx_filter_aspect;
 	int gfx_filter_autoscale;
 	int gfx_filter_integerscalelimit;
 	int gfx_filter_keep_autoscale_aspect;
 	int gfx_filter_rotation;
+	int gfx_filter_blanking;
 	bool changed;
 };
 
@@ -443,6 +451,8 @@ struct rtgboardconfig
 	uae_u32 rtgmem_size;
 	int device_order;
 	int monitor_id;
+	bool autoswitch;
+	bool initial_active;
 };
 struct boardloadfile
 {
@@ -498,6 +508,28 @@ struct monconfig
 	struct wh gfx_size_fs_xtra[GFX_SIZE_EXTRA_NUM];
 };
 
+#define KB_DISCONNECTED -1
+#define KB_UAE 0
+#define KB_A500_6570 1
+#define KB_A600_6570 2
+#define KB_A1000_6500 3
+#define KB_A1000_6570 4
+#define KB_A1200_6805 5
+#define KB_A2000_8039 6
+#define KB_Ax000_6570 7
+
+#define DISPLAY_OPTIMIZATIONS_FULL 0
+#define DISPLAY_OPTIMIZATIONS_PARTIAL 1
+#define DISPLAY_OPTIMIZATIONS_NONE 2
+
+#define HVSYNC_COMBINED 0
+#define HVSYNC_CSYNC 1
+#define HVSYNC_HVSYNC 2
+#define HVSYNC_SYNCPOS 3
+#define HVSYNC_COMBINED_SYNC 3
+#define HVSYNC_CSYNC_SYNC 4
+#define HVSYNC_HVSYNC_SYNC 5
+
 struct uae_prefs {
 
 	struct strlist *all_lines;
@@ -512,6 +544,7 @@ struct uae_prefs {
 	TCHAR config_all_path[MAX_DPATH];
 	TCHAR config_path[MAX_DPATH];
 	TCHAR config_window_title[256];
+	int got_fs2_hdf2;
 
 	bool illegal_mem;
 	bool debug_mem;
@@ -534,6 +567,9 @@ struct uae_prefs {
 
 	bool start_debugger;
 	int debugging_features;
+#ifdef GDBSERVER
+	int gdb_port;
+#endif
 	TCHAR debugging_options[MAX_DPATH];
 	bool start_gui;
 
@@ -594,25 +630,28 @@ struct uae_prefs {
 	int gfx_xcenter_pos, gfx_ycenter_pos;
 	int gfx_xcenter_size, gfx_ycenter_size;
 	int gfx_max_horizontal, gfx_max_vertical;
+	bool gfx_keep_aspect;
 	int gfx_saturation, gfx_luminance, gfx_contrast, gfx_gamma, gfx_gamma_ch[3];
 	bool gfx_blackerthanblack;
 	int gfx_threebitcolors;
 	int gfx_api;
 	int gfx_api_options;
-	int color_mode;
 	int gfx_extrawidth;
 	int gfx_extraheight;
 	bool lightboost_strobo;
 	int lightboost_strobo_ratio;
 	bool gfx_grayscale;
 	bool lightpen_crosshair;
-	int lightpen_offset[2];
+	int lightpen_offset[2][2];
 	int gfx_display_sections;
 	int gfx_variable_sync;
 	bool gfx_windowed_resize;
 	int gfx_overscanmode;
 	int gfx_monitorblankdelay;
 	int gfx_rotation;
+	bool gfx_ntscpixels;
+	bool gfx_ntscpixelspal;
+	uae_u32 gfx_bordercolor;
 
 	struct gfx_filterdata gf[3];
 
@@ -624,7 +663,9 @@ struct uae_prefs {
 	float blitter_speed_throttle;
 	unsigned int chipset_mask;
 	bool chipset_hr;
-	bool keyboard_connected;
+	int display_calibration;
+	int keyboard_mode;
+	bool keyboard_nkro;
 	bool ntscmode;
 	bool genlock;
 	int genlock_image;
@@ -729,6 +770,8 @@ struct uae_prefs {
 	int cs_ciatype[2];
 	int cs_kbhandshake;
 	int cs_hvcsync;
+	int cs_hsyncadjust;
+	int cs_vsyncadjust;
 	int cs_eclockphase;
 	int cs_eclocksync;
 	int cs_agnusmodel;
@@ -738,6 +781,7 @@ struct uae_prefs {
 	bool cs_ipldelay;
 	bool cs_floppydatapullup;
 	uae_u32 seed;
+	int cs_optimizations;
 
 	struct boardromconfig expansionboard[MAX_EXPANSION_BOARDS];
 
@@ -753,8 +797,8 @@ struct uae_prefs {
 	TCHAR cartident[256];
 	int cart_internal;
 	TCHAR pci_devices[256];
-	TCHAR prtname[256];
-	TCHAR sername[256];
+	TCHAR prtname[MAX_DPATH];
+	TCHAR sername[MAX_DPATH];
 	TCHAR a2065name[MAX_DPATH];
 	TCHAR ne2000pciname[MAX_DPATH];
 	TCHAR ne2000pcmcianame[MAX_DPATH];
@@ -762,6 +806,7 @@ struct uae_prefs {
 	struct cdslot cdslots[MAX_TOTAL_SCSI_DEVICES];
 	TCHAR quitstatefile[MAX_DPATH];
 	TCHAR statefile[MAX_DPATH];
+	TCHAR statefile_path[MAX_DPATH];
 	TCHAR inprecfile[MAX_DPATH];
 	TCHAR trainerfile[MAX_DPATH];
 	bool inprec_autoplay;
@@ -791,6 +836,7 @@ struct uae_prefs {
 	bool cpu_data_cache;
 	bool picasso96_nocustom;
 	int picasso96_modeflags;
+	bool picasso96_noautomodes;
 	int cpu_model_fallback;
 
 	uae_u32 z3autoconfig_start;
@@ -872,38 +918,38 @@ struct uae_prefs {
 	bool win32_start_minimized;
 	bool win32_start_uncaptured;
 
-	int win32_active_capture_priority;
-	bool win32_active_nocapture_pause;
-	bool win32_active_nocapture_nosound;
-	int win32_active_input;
-	int win32_inactive_priority;
-	bool win32_inactive_pause;
-	bool win32_inactive_nosound;
-	int win32_inactive_input;
-	int win32_iconified_priority;
-	bool win32_iconified_pause;
-	bool win32_iconified_nosound;
-	int win32_iconified_input;
+	int host_active_capture_priority;
+	bool host_active_nocapture_pause;
+	bool host_active_nocapture_nosound;
+	int host_active_input;
+	int host_inactive_priority;
+	bool host_inactive_pause;
+	bool host_inactive_nosound;
+	int host_inactive_input;
+	int host_iconified_priority;
+	bool host_iconified_pause;
+	bool host_iconified_nosound;
+	int host_iconified_input;
 
-	bool win32_rtgmatchdepth;
-	bool win32_rtgallowscaling;
-	int win32_rtgscaleaspectratio;
-	int win32_rtgvblankrate;
+	bool host_rtgallowscaling;
+	bool host_rtgnonsquarepixels;
+	int host_rtgscaleaspectratio;
+	int host_rtgvblankrate;
 	bool win32_borderless;
 	bool win32_ctrl_F11_is_quit;
-	bool win32_automount_removable;
-	bool win32_automount_drives;
-	bool win32_automount_cddrives;
-	bool win32_automount_netdrives;
-	bool win32_automount_removabledrives;
-	int win32_midioutdev;
-	int win32_midiindev;
-	bool win32_midirouter;
-	int win32_uaescsimode;
-	int win32_soundcard;
-	int win32_samplersoundcard;
+	bool host_automount_removable;
+	bool host_automount_drives;
+	bool host_automount_cddrives;
+	bool host_automount_netdrives;
+	bool host_automount_removabledrives;
+	int host_midioutdev;
+	int host_midiindev;
+	bool host_midirouter;
+	int host_uaescsimode;
+	int host_soundcard;
+	int host_samplersoundcard;
 	bool win32_norecyclebin;
-	int win32_guikey;
+	int host_guikey;
 	int win32_kbledmode;
 	bool win32_blankmonitors;
 	TCHAR win32_commandpathstart[MAX_DPATH];
@@ -933,6 +979,7 @@ struct uae_prefs {
 
 	struct jport jports[MAX_JPORTS];
 	struct jport_custom jports_custom[MAX_JPORTS_CUSTOM];
+	int jports_default[MAX_JPORTS];
 	int input_selected_setting;
 	int input_joymouse_multiplier;
 	int input_joymouse_deadzone;
@@ -979,7 +1026,6 @@ extern void cfgfile_target_write_bool (struct zfile *f, const TCHAR *option, boo
 extern void cfgfile_target_dwrite_bool (struct zfile *f, const TCHAR *option, bool b);
 
 extern void cfgfile_write_str(struct zfile *f, const TCHAR *option, const TCHAR *value);
-extern void cfgfile_write_str_escape(struct zfile *f, const TCHAR *option, const TCHAR *value);
 extern void cfgfile_dwrite_str(struct zfile *f, const TCHAR *option, const TCHAR *value);
 extern void cfgfile_target_write_str(struct zfile *f, const TCHAR *option, const TCHAR *value);
 extern void cfgfile_target_dwrite_str(struct zfile *f, const TCHAR *option, const TCHAR *value);
@@ -1012,11 +1058,13 @@ extern TCHAR *cfgfile_subst_path(const TCHAR *path, const TCHAR *subst, const TC
 
 extern TCHAR *target_expand_environment (const TCHAR *path, TCHAR *out, int maxlen);
 extern int target_parse_option (struct uae_prefs *, const TCHAR *option, const TCHAR *value, int type);
+extern int target_parse_compat_option(struct uae_prefs *, const TCHAR *option, const TCHAR *value, int type);
 extern void target_save_options (struct zfile*, struct uae_prefs *);
 extern void target_default_options (struct uae_prefs *, int type);
 extern void target_fixup_options (struct uae_prefs *);
 extern int target_cfgfile_load (struct uae_prefs *, const TCHAR *filename, int type, int isdefault);
 extern void cfgfile_save_options (struct zfile *f, struct uae_prefs *p, int type);
+extern void cfgfile_save_options_full(struct zfile *f, struct uae_prefs *p, int type);
 extern int target_get_display (const TCHAR*);
 extern const TCHAR *target_get_display_name (int, bool);
 extern void target_multipath_modified(struct uae_prefs *);

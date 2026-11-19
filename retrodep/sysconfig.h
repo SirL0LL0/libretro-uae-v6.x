@@ -64,8 +64,10 @@
 #define A2091 /* A590/A2091 SCSI */
 //#define A2065 /* A2065 Ethernet card */
 #define GFXBOARD /* Hardware graphics board */
+#define WITH_CPUBOARD /* Accelerator boards (Blizzard, GVP, CyberStorm...) */
 #define NCR /* A4000T/A4091, 53C710/53C770 SCSI */
-//#define NCR9X /* 53C9X SCSI */
+#define HAVE_LSI /* NCR: QEMU 53C710/53C8xx cores (qemuvga/lsi53c*.c); without it the NCR controllers are dummies */
+#define NCR9X /* 53C9X SCSI (accelerator boards: Blizzard 1230 I/II/2060, CyberStorm MK II/III...) */
 //#define SANA2 /* SANA2 network driver */
 //#define AMAX /* A-Max ROM adapter emulation */
 //#define RETROPLATFORM /* Cloanto RetroPlayer support */
@@ -88,6 +90,7 @@
 //#define WITH_DRACO
 
 //#define WITH_CHD
+#define WITH_ARCHIVES /* archive handling in zfile_archive.c (upstream made it optional) */
 #define A_ZIP
 //#define A_RAR
 //#define A_7Z
@@ -394,7 +397,8 @@
 #define HAVE__BOOL 1
 
 /* Version number of package */
-#define VERSION "5.3.1"
+/* Synced with tonioni/WinUAE master (6.1.0 beta 19, 2026-10-25) */
+#define VERSION "6.1.0"
 
 /* Name of package */
 #define PACKAGE "puae"

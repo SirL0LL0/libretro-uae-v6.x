@@ -19992,8 +19992,6 @@ uae_u32 REGPARAM2 op_4e73_33_ff(uae_u32 opcode)
 		newsr = sr; newpc = pc;
 		if (frame == 0x0) {
 		m68k_areg(regs, 7) += offset; break; }
-		else if (frame == 0x1) {
-		m68k_areg(regs, 7) += offset; }
 		else if (frame == 0x2) {
 		m68k_areg(regs, 7) += offset + 4; break; }
 		else if (frame == 0x3) {
@@ -38944,7 +38942,7 @@ uae_u32 REGPARAM2 op_e8c0_33_ff(uae_u32 opcode)
 	int width = (((extra & 0x20 ? m68k_dreg(regs, extra & 7) : extra) - 1) & 0x1f) + 1;
 	uae_u32 tmp = m68k_dreg(regs, dstreg);
 	offset &= 0x1f;
-	tmp = (tmp << offset) | (tmp >> (32 - offset));
+	if (offset) tmp = (tmp << offset) | (tmp >> (32 - offset));
 	bdata[0] = tmp & ((1 << (32 - width)) - 1);
 	SET_ALWAYS_NFLG(((uae_s32)tmp) < 0 ? 1 : 0);
 	tmp >>= (32 - width);
@@ -39139,7 +39137,7 @@ uae_u32 REGPARAM2 op_e9c0_33_ff(uae_u32 opcode)
 	int width = (((extra & 0x20 ? m68k_dreg(regs, extra & 7) : extra) - 1) & 0x1f) + 1;
 	uae_u32 tmp = m68k_dreg(regs, dstreg);
 	offset &= 0x1f;
-	tmp = (tmp << offset) | (tmp >> (32 - offset));
+	if (offset) tmp = (tmp << offset) | (tmp >> (32 - offset));
 	bdata[0] = tmp & ((1 << (32 - width)) - 1);
 	SET_ALWAYS_NFLG(((uae_s32)tmp) < 0 ? 1 : 0);
 	tmp >>= (32 - width);
@@ -39342,14 +39340,14 @@ uae_u32 REGPARAM2 op_eac0_33_ff(uae_u32 opcode)
 	int width = (((extra & 0x20 ? m68k_dreg(regs, extra & 7) : extra) - 1) & 0x1f) + 1;
 	uae_u32 tmp = m68k_dreg(regs, dstreg);
 	offset &= 0x1f;
-	tmp = (tmp << offset) | (tmp >> (32 - offset));
+	if (offset) tmp = (tmp << offset) | (tmp >> (32 - offset));
 	bdata[0] = tmp & ((1 << (32 - width)) - 1);
 	SET_ALWAYS_NFLG(((uae_s32)tmp) < 0 ? 1 : 0);
 	tmp >>= (32 - width);
 	SET_ZFLG(tmp == 0); SET_VFLG(0); SET_CFLG(0);
 	tmp = tmp ^ (0xffffffffu >> (32 - width));
 	tmp = bdata[0] | (tmp << (32 - width));
-	m68k_dreg(regs, dstreg) = (tmp >> offset) | (tmp << (32 - offset));
+	m68k_dreg(regs, dstreg) = offset ? ((tmp >> offset) | (tmp << (32 - offset))) : tmp;
 	m68k_incpci(4);
 	return (1 * 4 * CYCLE_UNIT / 2 + count_cycles) * 4;
 }
@@ -39500,7 +39498,7 @@ uae_u32 REGPARAM2 op_ebc0_33_ff(uae_u32 opcode)
 	int width = (((extra & 0x20 ? m68k_dreg(regs, extra & 7) : extra) - 1) & 0x1f) + 1;
 	uae_u32 tmp = m68k_dreg(regs, dstreg);
 	offset &= 0x1f;
-	tmp = (tmp << offset) | (tmp >> (32 - offset));
+	if (offset) tmp = (tmp << offset) | (tmp >> (32 - offset));
 	bdata[0] = tmp & ((1 << (32 - width)) - 1);
 	SET_ALWAYS_NFLG(((uae_s32)tmp) < 0 ? 1 : 0);
 	tmp = (uae_s32)tmp >> (32 - width);
@@ -39703,14 +39701,14 @@ uae_u32 REGPARAM2 op_ecc0_33_ff(uae_u32 opcode)
 	int width = (((extra & 0x20 ? m68k_dreg(regs, extra & 7) : extra) - 1) & 0x1f) + 1;
 	uae_u32 tmp = m68k_dreg(regs, dstreg);
 	offset &= 0x1f;
-	tmp = (tmp << offset) | (tmp >> (32 - offset));
+	if (offset) tmp = (tmp << offset) | (tmp >> (32 - offset));
 	bdata[0] = tmp & ((1 << (32 - width)) - 1);
 	SET_ALWAYS_NFLG(((uae_s32)tmp) < 0 ? 1 : 0);
 	tmp >>= (32 - width);
 	SET_ZFLG(tmp == 0); SET_VFLG(0); SET_CFLG(0);
 	tmp = 0;
 	tmp = bdata[0] | (tmp << (32 - width));
-	m68k_dreg(regs, dstreg) = (tmp >> offset) | (tmp << (32 - offset));
+	m68k_dreg(regs, dstreg) = offset ? ((tmp >> offset) | (tmp << (32 - offset))) : tmp;
 	m68k_incpci(4);
 	return (1 * 4 * CYCLE_UNIT / 2 + count_cycles) * 4;
 }
@@ -39862,7 +39860,7 @@ uae_u32 REGPARAM2 op_edc0_33_ff(uae_u32 opcode)
 	uae_u32 offset2 = offset;
 	uae_u32 tmp = m68k_dreg(regs, dstreg);
 	offset &= 0x1f;
-	tmp = (tmp << offset) | (tmp >> (32 - offset));
+	if (offset) tmp = (tmp << offset) | (tmp >> (32 - offset));
 	bdata[0] = tmp & ((1 << (32 - width)) - 1);
 	SET_ALWAYS_NFLG(((uae_s32)tmp) < 0 ? 1 : 0);
 	tmp >>= (32 - width);
@@ -40088,14 +40086,14 @@ uae_u32 REGPARAM2 op_eec0_33_ff(uae_u32 opcode)
 	int width = (((extra & 0x20 ? m68k_dreg(regs, extra & 7) : extra) - 1) & 0x1f) + 1;
 	uae_u32 tmp = m68k_dreg(regs, dstreg);
 	offset &= 0x1f;
-	tmp = (tmp << offset) | (tmp >> (32 - offset));
+	if (offset) tmp = (tmp << offset) | (tmp >> (32 - offset));
 	bdata[0] = tmp & ((1 << (32 - width)) - 1);
 	SET_ALWAYS_NFLG(((uae_s32)tmp) < 0 ? 1 : 0);
 	tmp >>= (32 - width);
 	SET_ZFLG(tmp == 0); SET_VFLG(0); SET_CFLG(0);
 	tmp = 0xffffffffu >> (32 - width);
 	tmp = bdata[0] | (tmp << (32 - width));
-	m68k_dreg(regs, dstreg) = (tmp >> offset) | (tmp << (32 - offset));
+	m68k_dreg(regs, dstreg) = offset ? ((tmp >> offset) | (tmp << (32 - offset))) : tmp;
 	m68k_incpci(4);
 	return (1 * 4 * CYCLE_UNIT / 2 + count_cycles) * 4;
 }
@@ -40246,7 +40244,7 @@ uae_u32 REGPARAM2 op_efc0_33_ff(uae_u32 opcode)
 	int width = (((extra & 0x20 ? m68k_dreg(regs, extra & 7) : extra) - 1) & 0x1f) + 1;
 	uae_u32 tmp = m68k_dreg(regs, dstreg);
 	offset &= 0x1f;
-	tmp = (tmp << offset) | (tmp >> (32 - offset));
+	if (offset) tmp = (tmp << offset) | (tmp >> (32 - offset));
 	bdata[0] = tmp & ((1 << (32 - width)) - 1);
 	SET_ALWAYS_NFLG(((uae_s32)tmp) < 0 ? 1 : 0);
 	tmp >>= (32 - width);
@@ -40256,7 +40254,7 @@ uae_u32 REGPARAM2 op_efc0_33_ff(uae_u32 opcode)
 	SET_ALWAYS_NFLG(tmp & (1 << (width - 1)) ? 1 : 0);
 	SET_ZFLG(tmp == 0);
 	tmp = bdata[0] | (tmp << (32 - width));
-	m68k_dreg(regs, dstreg) = (tmp >> offset) | (tmp << (32 - offset));
+	m68k_dreg(regs, dstreg) = offset ? ((tmp >> offset) | (tmp << (32 - offset))) : tmp;
 	m68k_incpci(4);
 	return (1 * 4 * CYCLE_UNIT / 2 + count_cycles) * 4;
 }

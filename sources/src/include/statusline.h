@@ -2,6 +2,7 @@
 #define UAE_STATUSLINE_H
 
 #include "uae/types.h"
+#include "gui.h"
 
 #ifdef __LIBRETRO__
 #define TD_DEFAULT_PADX 1
@@ -14,6 +15,8 @@
 #define TD_DEFAULT_WIDTH 30
 #define TD_DEFAULT_LED_WIDTH 24
 #define TD_DEFAULT_LED_HEIGHT 4
+
+#define TD_MAX_CHARS 3
 
 #define TD_RIGHT 1
 #define TD_BOTTOM 2
@@ -42,8 +45,9 @@ extern int td_width;
 #define STATUSLINE_RTG 2
 #define STATUSLINE_TARGET 0x80
 
-void draw_status_line_single(int monid, uae_u8 *buf, int bpp, int y, int totalwidth, uae_u32 *rc, uae_u32 *gc, uae_u32 *bc, uae_u32 *alpha);
-void statusline_single_erase(int monid, uae_u8 *buf, int bpp, int y, int totalwidth);
+void draw_status_line_single(int monid, uae_u8 *buf, int y, int totalwidth, uae_u32 *rc, uae_u32 *gc, uae_u32 *bc, uae_u32 *alpha);
+
+void statusline_single_erase(int monid, uae_u8 *buf, int y, int totalwidth);
 void statusline_getpos(int monid, int *x, int *y, int width, int height);
 
 #define STATUSTYPE_FLOPPY 1
@@ -54,7 +58,7 @@ void statusline_getpos(int monid, int *x, int *y, int width, int height);
 
 bool createstatusline(HWND, int);
 void deletestatusline(int);
-void statusline_render(int, uae_u8 *buf, int bpp, int pitch, int width, int height, uae_u32 *rc, uae_u32 *gc, uae_u32 *bc, uae_u32 *alpha);
+void statusline_render(int, uae_u8 *buf, int pitch, int width, int height, uae_u32 *rc, uae_u32 *gc, uae_u32 *bc, uae_u32 *alpha);
 void statusline_add_message(int statustype, const TCHAR *format, ...);
 void statusline_clear(void);
 void statusline_vsync(void);
@@ -65,5 +69,8 @@ int statusline_set_multiplier(int, int, int);
 int statusline_get_multiplier(int monid);
 void statusline_set_font(const char *newnumbers, int width, int height);
 void ldp_render(const char *txt, int len, uae_u8 *buf, struct vidbuffer*, int x, int y, int mx, int my);
+
+extern const uae_s8 defaultosdledpos[LED_MAX];
+bool statusline_led_visible(int led);
 
 #endif /* UAE_STATUSLINE_H */

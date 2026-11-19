@@ -4,13 +4,12 @@
 
 #include "ethernet.h"
 #ifndef __LIBRETRO__
-#ifdef _WIN32
-#include "win32_uaenet.h"
+#ifdef WITH_UAENET_PCAP
+#include "uaenet.h"
 #endif
 #endif
 #include "threaddep/thread.h"
 #include "options.h"
-#include "traps.h"
 #include "sana2.h"
 #include "uae/slirp.h"
 #include "gui.h"
@@ -81,6 +80,7 @@ void ethernet_trigger (struct netdriverdata *ndd, void *vsd)
 	gui_flicker_led(LED_NET, 0, gui_data.net | 2);
 	switch (ndd->type)
 	{
+#ifdef WITH_SLIRP
 		case UAENET_SLIRP:
 		case UAENET_SLIRP_INBOUND:
 		{
@@ -100,8 +100,11 @@ void ethernet_trigger (struct netdriverdata *ndd, void *vsd)
 			}
 		}
 		return;
+#endif
 #ifdef WITH_UAENET_PCAP
 		case UAENET_PCAP:
+		case UAENET_TAP:
+		case UAENET_TUN:
 		uaenet_trigger (vsd);
 		return;
 #endif
@@ -112,6 +115,7 @@ int ethernet_open (struct netdriverdata *ndd, void *vsd, void *user, ethernet_go
 {
 	switch (ndd->type)
 	{
+#ifdef WITH_SLIRP
 		case UAENET_SLIRP:
 		case UAENET_SLIRP_INBOUND:
 		{
@@ -122,7 +126,12 @@ int ethernet_open (struct netdriverdata *ndd, void *vsd, void *user, ethernet_go
 			slirp_data = ed;
 			uae_sem_init (&slirp_sem1, 0, 1);
 			uae_sem_init (&slirp_sem2, 0, 1);
-			uae_slirp_init();
+			if (uae_slirp_init() < 0) {
+				slirp_data = NULL;
+				uae_sem_destroy (&slirp_sem1);
+				uae_sem_destroy (&slirp_sem2);
+				return 0;
+			}
 			for (int i = 0; i < MAX_SLIRP_REDIRS; i++) {
 				struct slirp_redir *sr = &currprefs.slirp_redirs[i];
 				if (sr->proto) {
@@ -156,11 +165,20 @@ int ethernet_open (struct netdriverdata *ndd, void *vsd, void *user, ethernet_go
 				}
 			}
 			netmode = ndd->type;
-			uae_slirp_start ();
+			if (!uae_slirp_start ()) {
+				uae_slirp_cleanup ();
+				slirp_data = NULL;
+				uae_sem_destroy (&slirp_sem1);
+				uae_sem_destroy (&slirp_sem2);
+				return 0;
+			}
 		}
 		return 1;
+#endif
 #ifdef WITH_UAENET_PCAP
 		case UAENET_PCAP:
+		case UAENET_TAP:
+		case UAENET_TUN:
 		if (uaenet_open (vsd, ndd, user, gotfunc, getfunc, promiscuous, mac)) {
 			netmode = ndd->type;
 			return 1;
@@ -177,18 +195,22 @@ void ethernet_close (struct netdriverdata *ndd, void *vsd)
 		return;
 	switch (ndd->type)
 	{
+#ifdef WITH_SLIRP
 		case UAENET_SLIRP:
 		case UAENET_SLIRP_INBOUND:
 		if (slirp_data) {
-			slirp_data = NULL;
 			uae_slirp_end ();
 			uae_slirp_cleanup ();
+			slirp_data = NULL;
 			uae_sem_destroy (&slirp_sem1);
 			uae_sem_destroy (&slirp_sem2);
 		}
 		return;
+#endif
 #ifdef WITH_UAENET_PCAP
 		case UAENET_PCAP:
+		case UAENET_TAP:
+		case UAENET_TUN:
 		return uaenet_close (vsd);
 #endif
 	}
@@ -256,6 +278,8 @@ void ethernet_close_driver (struct netdriverdata *ndd)
 		return;
 #ifdef WITH_UAENET_PCAP
 		case UAENET_PCAP:
+		case UAENET_TAP:
+		case UAENET_TUN:
 		return uaenet_close_driver (ndd);
 #endif
 	}
@@ -271,6 +295,8 @@ int ethernet_getdatalenght (struct netdriverdata *ndd)
 		return sizeof (struct ethernet_data);
 #ifdef WITH_UAENET_PCAP
 		case UAENET_PCAP:
+		case UAENET_TAP:
+		case UAENET_TUN:
 		return uaenet_getdatalenght ();
 #endif
 	}

@@ -20,6 +20,8 @@
 #include "gui.h"
 #include "audio.h"
 #include "memory.h"
+#include "autoconf.h"
+#include "rommgr.h"
 #include "sounddep/sound.h"
 
 #ifndef MAX_STOP
@@ -33,7 +35,7 @@ static const TCHAR *cscompa[] = {
    _T("Velvet"), _T("Casablanca"), _T("DraCo"),
    NULL
 };
-static const TCHAR *csmode[] = { _T("ocs"), _T("ecs_agnus"), _T("ecs_denise"), _T("ecs"), _T("aga"), 0 };
+static const TCHAR *csmode[] = { _T("ocs"), _T("ecs_agnus"), _T("ecs_denise"), _T("ecs"), _T("aga"), _T("a1000"), 0 };
 
 #ifdef USE_LIBRETRO_VFS
 #undef utf8_to_local_string_alloc
@@ -76,10 +78,13 @@ unsigned short int retrox_crop = 0;
 unsigned short int retroy_crop = 0;
 float aspect_ratio = 0;
 
-extern int bplcon0;
+extern uae_u16 bplcon0;
 extern int detected_screen_resolution;
-extern int diwlastword_total;
-extern int diwfirstword_total;
+/* The emulation's display window totals changed their unit with WinUAE 6
+ * (Denise pixel counter instead of window coordinates). The frontend keeps
+ * working with window coordinates, which are derived in libretro-glue.c:
+ * the former "diwfirstword_total" and "diwlastword_total" are
+ * retro_min_diwstart and retro_max_diwstop. */
 extern int m68k_go(int may_quit, int resume);
 extern void compute_vsynctime(void);
 extern int nr_units(void);
@@ -93,6 +98,11 @@ char opt_model_fd[10] = {0};
 char opt_model_hd[10] = {0};
 char opt_model_cd[10] = {0};
 char opt_kickstart[64] = {0};
+static char opt_keyboard_type[32] = "uae";
+static void retro_config_keyboard(void);
+static char opt_cpuboard[32] = "none";
+static int opt_cpuboard_mem = -1;
+static void retro_config_cpuboard(void);
 
 struct preset_options
 {
@@ -202,7 +212,7 @@ unsigned char width_multiplier = 1;
 
 static int opt_vertical_offset = 0;
 static bool opt_vertical_offset_auto = true;
-extern int minfirstline;
+extern int retro_minfirstline;
 static int retro_thisframe_counter = 0;
 extern int retro_thisframe_first_drawn_line;
 static int retro_thisframe_first_drawn_line_old = -1;
@@ -210,8 +220,8 @@ static int retro_thisframe_first_drawn_line_start = -1;
 extern int retro_thisframe_last_drawn_line;
 static int retro_thisframe_last_drawn_line_old = -1;
 static int retro_thisframe_last_drawn_line_start = -1;
-extern int thisframe_y_adjust;
-static int thisframe_y_adjust_old = -1;
+extern int retro_thisframe_y_adjust;
+static int retro_thisframe_y_adjust_old = -1;
 
 static int opt_horizontal_offset = 0;
 static bool opt_horizontal_offset_auto = true;
@@ -222,8 +232,14 @@ static int retro_min_diwstart_old = -1;
 extern int retro_max_diwstop;
 static int retro_max_diwstop_old = -1;
 static int retro_diwstartstop_counter = 0;
-extern int visible_left_border;
-static int visible_left_border_old = 0;
+extern int retro_visible_left_border;
+static int retro_visible_left_border_old = 0;
+
+/* The window is cut out of the emulation's raster (libretro-glue.c) */
+extern void retro_video_blit(void);
+#ifdef WITH_MPEG2
+extern int cd32_fmv_active;
+#endif
 
 #define PAL_KS2_CROP_SAFE_FIRST_LINE  99
 #define PAL_KS2_CROP_SAFE_LAST_LINE   244
@@ -239,6 +255,7 @@ bool opt_aspect_ratio_locked = false;
 
 struct zfile *retro_deserialize_file = NULL;
 static size_t save_state_file_size = 0;
+static void retro_update_memory_info(void);
 
 unsigned int retro_devices[RETRO_DEVICES] = {0};
 extern void display_current_image(const char *image, bool inserted);
@@ -775,14 +792,34 @@ static void retro_set_core_options()
    static struct retro_core_option_v2_category option_cats_us[] =
    {
       {
-         "system",
-         "System",
-         "Configure system options."
+         "machine",
+         "Machine",
+         "Model and presets, Kickstart, chipset, video standard, clock."
       },
       {
-         "audio",
-         "Audio",
-         "Configure audio options."
+         "cpu",
+         "CPU",
+         "Processor, FPU, compatibility and speed."
+      },
+      {
+         "memory",
+         "Memory",
+         "Chip, Slow and Fast RAM."
+      },
+      {
+         "expansion",
+         "Expansions",
+         "Accelerator boards, cartridges, keyboard."
+      },
+      {
+         "chipset",
+         "Chipset",
+         "Emulation accuracy of blitter, collisions and drawing."
+      },
+      {
+         "media",
+         "Media",
+         "Floppy disks, hard drives, WHDLoad and compact discs."
       },
       {
          "video",
@@ -790,9 +827,9 @@ static void retro_set_core_options()
          "Configure video options."
       },
       {
-         "media",
-         "Media",
-         "Configure media options."
+         "audio",
+         "Audio",
+         "Configure audio options."
       },
       {
          "input",
@@ -822,13 +859,14 @@ static void retro_set_core_options()
    {
       {
          "puae_model",
-         "System > Model",
+         "Machine > Model",
          "Model",
          "'Automatic' defaults to 'A500' with floppy disks, 'A1200' with hard drives and 'CD32' with compact discs. 'Automatic' can be overridden with file path tags.\nCore restart required.",
          NULL,
-         "system",
+         "machine",
          {
             { "auto", "Automatic" },
+            { "A1000", "A1000 (v1.3, 0.5M Chip)" },
             { "A500OG", "A500 (v1.3, 0.5M Chip)" },
             { "A500", "A500 (v1.3, 0.5M Chip + 0.5M Slow)" },
             { "A500ECS", "A500 (v1.3, 1.0M Chip)" },
@@ -839,9 +877,13 @@ static void retro_set_core_options()
             { "A1200", "A1200 (v3.1, 2M Chip + 8M Fast)" },
             { "A2000OG", "A2000 (v1.3, 0.5M Chip + 0.5M Slow)" },
             { "A2000", "A2000 (v3.1, 1M Chip)" },
+            { "A3000", "A3000 (v3.1, 2M Chip + 8M Fast, 68030)" },
             { "A4030", "A4000/030 (v3.1, 2M Chip + 8M Fast)" },
             { "A4040", "A4000/040 (v3.1, 2M Chip + 8M Fast)" },
+            { "A4060", "A4000/060 (v3.1, 2M Chip + 8M Fast)" },
+            { "A4000T", "A4000T (v3.1, 2M Chip + 8M Fast, 68040)" },
             { "CDTV", "CDTV (1M Chip)" },
+            { "CDTVCR", "CDTV-CR (v2.05, 1M Chip)" },
             { "CD32", "CD32 (2M Chip)" },
             { "CD32FR", "CD32 (2M Chip + 8M Fast)" },
             { NULL, NULL },
@@ -850,11 +892,11 @@ static void retro_set_core_options()
       },
       {
          "puae_model_options_display",
-         "System > Show Automatic Model Options",
+         "Machine > Show Automatic Model Options",
          "Show Automatic Model Options",
          "Show/hide default model options (Floppy/HD/CD) for 'Automatic' model.",
          NULL,
-         "system",
+         "machine",
          {
             { "disabled", NULL },
             { "enabled", NULL },
@@ -868,8 +910,9 @@ static void retro_set_core_options()
          "Automatic Floppy",
          "Default model when floppies are launched with 'Automatic' model.\nCore restart required.",
          NULL,
-         "system",
+         "machine",
          {
+            { "A1000", "A1000 (v1.3, 0.5M Chip)" },
             { "A500OG", "A500 (v1.3, 0.5M Chip)" },
             { "A500", "A500 (v1.3, 0.5M Chip + 0.5M Slow)" },
             { "A500ECS", "A500 (v1.3, 1.0M Chip)" },
@@ -880,6 +923,7 @@ static void retro_set_core_options()
             { "A1200", "A1200 (v3.1, 2M Chip + 8M Fast)" },
             { "A2000OG", "A2000 (v1.3, 0.5M Chip + 0.5M Slow)" },
             { "A2000", "A2000 (v3.1, 1M Chip)" },
+            { "A3000", "A3000 (v3.1, 2M Chip + 8M Fast, 68030)" },
             { "A4030", "A4000/030 (v3.1, 2M Chip + 8M Fast)" },
             { "A4040", "A4000/040 (v3.1, 2M Chip + 8M Fast)" },
             { NULL, NULL },
@@ -892,15 +936,18 @@ static void retro_set_core_options()
          "Automatic HD",
          "Default model when HD interface is used with 'Automatic' model. Affects WHDLoad installs and other hard drive images.\nCore restart required.",
          NULL,
-         "system",
+         "machine",
          {
             { "A600OG", "A600 (v3.1, 2M Chip)" },
             { "A600", "A600 (v3.1, 2M Chip + 8M Fast)" },
             { "A1200OG", "A1200 (v3.1, 2M Chip)" },
             { "A1200", "A1200 (v3.1, 2M Chip + 8M Fast)" },
             { "A2000", "A2000 (v3.1, 1M Chip)" },
+            { "A3000", "A3000 (v3.1, 2M Chip + 8M Fast, 68030)" },
             { "A4030", "A4000/030 (v3.1, 2M Chip + 8M Fast)" },
             { "A4040", "A4000/040 (v3.1, 2M Chip + 8M Fast)" },
+            { "A4060", "A4000/060 (v3.1, 2M Chip + 8M Fast)" },
+            { "A4000T", "A4000T (v3.1, 2M Chip + 8M Fast, 68040)" },
             { NULL, NULL },
          },
          "A1200"
@@ -911,9 +958,10 @@ static void retro_set_core_options()
          "Automatic CD",
          "Default model when compact discs are launched with 'Automatic' model.\nCore restart required.",
          NULL,
-         "system",
+         "machine",
          {
             { "CDTV", "CDTV (1M Chip)" },
+            { "CDTVCR", "CDTV-CR (v2.05, 1M Chip)" },
             { "CD32", "CD32 (2M Chip)" },
             { "CD32FR", "CD32 (2M Chip + 8M Fast)" },
             { NULL, NULL },
@@ -922,11 +970,11 @@ static void retro_set_core_options()
       },
       {
          "puae_kickstart",
-         "System > Kickstart ROM",
+         "Machine > Kickstart ROM",
          "Kickstart ROM",
          "Kickstart ROMs are searched from 'system'.\nCore reset required.",
          NULL,
-         "system",
+         "machine",
          {
             /* Options filled dynamically later */
             { NULL, NULL },
@@ -934,89 +982,63 @@ static void retro_set_core_options()
          NULL
       },
       {
-         "puae_chipmem_size",
-         "System > Chip RAM",
-         "Chip RAM",
-         "'Automatic' defaults to the current preset model.\nCore reset required.",
+         "puae_chipset",
+         "Machine > Chipset",
+         "Chipset",
+         "Overrides the chipset of the model, e.g. an A500 with ECS Denise for productivity screen modes.\nCore restart required.",
          NULL,
-         "system",
+         "machine",
          {
             { "auto", "Automatic" },
-            { "1", "0.5M" },
-            { "2", "1M" },
-            { "3", "1.5M" },
-            { "4", "2M" },
+            { "ocs", "OCS" },
+            { "ecs_agnus", "ECS Agnus" },
+            { "ecs_denise", "ECS Denise" },
+            { "ecs", "Full ECS" },
+            { "aga", "AGA" },
             { NULL, NULL },
          },
          "auto"
       },
       {
-         "puae_bogomem_size",
-         "System > Slow RAM",
-         "Slow RAM",
-         "'Automatic' defaults to the current preset model.\nCore reset required.",
+         "puae_video_standard",
+         "Machine > Video Standard",
+         "Video Standard",
+         "Output Hz & height:\n- 'PAL': 50Hz - 288px / 576px\n- 'NTSC': 60Hz - 240px / 480px\n- 'Automatic' switches region per file path tags.",
          NULL,
-         "system",
+         "machine",
          {
-            { "auto", "Automatic" },
-            { "0", "None" },
-            { "2", "0.5M" },
-            { "4", "1M" },
-            { "6", "1.5M" },
-            { "7", "1.8M" },
+            { "PAL auto", "Automatic PAL" },
+            { "NTSC auto", "Automatic NTSC" },
+            { "PAL", NULL },
+            { "NTSC", NULL },
             { NULL, NULL },
          },
-         "auto"
+         "PAL auto"
       },
       {
-         "puae_fastmem_size",
-         "System > Z2 Fast RAM",
-         "Z2 Fast RAM",
-         "'Automatic' defaults to the current preset model.\nCore reset required.",
+         "puae_rtc",
+         "Machine > Real-Time Clock",
+         "Real-Time Clock",
+         "Battery backed clock, set from the host time. 'Automatic' follows the model: MSM6242B on most models, RP5C01A on A3000/A4000. 'None' for programs that misbehave with a clock.\nCore restart required.",
          NULL,
-         "system",
+         "machine",
          {
             { "auto", "Automatic" },
-            { "0", "None" },
-            { "1", "1M" },
-            { "2", "2M" },
-            { "4", "4M" },
-            { "8", "8M" },
-            { NULL, NULL },
-         },
-         "auto"
-      },
-      {
-         "puae_z3mem_size",
-         "System > Z3 Fast RAM",
-         "Z3 Fast RAM",
-         "'Automatic' defaults to the current preset model.\nCore reset required.",
-         NULL,
-         "system",
-         {
-            { "auto", "Automatic" },
-            { "0", "None" },
-            { "1", "1M" },
-            { "2", "2M" },
-            { "4", "4M" },
-            { "8", "8M" },
-            { "16", "16M" },
-            { "32", "32M" },
-            { "64", "64M" },
-            { "128", "128M" },
-            { "256", "256M" },
-            { "512", "512M" },
+            { "none", "None" },
+            { "MSM6242B", "MSM6242B (A500 trapdoor, A2000)" },
+            { "RP5C01A", "RP5C01A (A3000, A4000)" },
+            { "MSM6242B_A2000", "MSM6242B (A2000 mainboard)" },
             { NULL, NULL },
          },
          "auto"
       },
       {
          "puae_cpu_model",
-         "System > CPU Model",
+         "CPU > CPU Model",
          "CPU Model",
          "'Automatic' defaults to the current preset model.\nCore reset required.",
          NULL,
-         "system",
+         "cpu",
          {
             { "auto", "Automatic" },
             { "68000", NULL },
@@ -1031,11 +1053,11 @@ static void retro_set_core_options()
       },
       {
          "puae_fpu_model",
-         "System > FPU Model",
+         "CPU > FPU Model",
          "FPU Model",
          "'Automatic' defaults to the current preset model.\nCore reset required.",
          NULL,
-         "system",
+         "cpu",
          {
             { "auto", "Automatic" },
             { "0", "None" },
@@ -1047,12 +1069,32 @@ static void retro_set_core_options()
          "auto"
       },
       {
-         "puae_cpu_throttle",
-         "System > CPU Speed",
-         "CPU Speed",
-         "Ignored with 'Cycle-exact'.",
+         "puae_cpu_compatibility",
+         "CPU > CPU Compatibility",
+         "CPU Compatibility",
+         "Some games have graphic and/or speed issues without 'Cycle-exact'. 'Cycle-exact' can be forced with '(CE)' file path tag. (DMA/Memory) is forced to (Full) with 68000.",
          NULL,
-         "system",
+         "cpu",
+         {
+            { "normal", "Normal" },
+            { "compatible", "More compatible" },
+            { "memory", "Cycle-exact (DMA/Memory)" },
+            { "exact", "Cycle-exact (Full)" },
+            { NULL, NULL },
+         },
+#if defined(__x86_64__)
+         "exact"
+#else
+         "normal"
+#endif
+      },
+      {
+         "puae_cpu_throttle",
+         "CPU > CPU Speed",
+         "CPU Speed",
+         "Needs 'CPU Compatibility' set to 'Normal' or 'More compatible' (ignored with 'Cycle-exact'). 'Max' runs the CPU as fast as the PC allows, using the time left in each frame.",
+         NULL,
+         "cpu",
          {
             { "-900.0", "-90%" },
             { "-800.0", "-80%" },
@@ -1074,17 +1116,18 @@ static void retro_set_core_options()
             { "8000.0", "+800%" },
             { "9000.0", "+900%" },
             { "10000.0", "+1000%" },
+            { "max", "Max (fastest possible)" },
             { NULL, NULL },
          },
          "0.0"
       },
       {
          "puae_cpu_multiplier",
-         "System > CPU Cycle-exact Speed",
+         "CPU > CPU Cycle-exact Speed",
          "CPU Cycle-exact Speed",
          "Applies only with 'Cycle-exact'.",
          NULL,
-         "system",
+         "cpu",
          {
             { "0", "Default" },
             { "1", "3.546895 MHz" },
@@ -1099,32 +1142,213 @@ static void retro_set_core_options()
          "0"
       },
       {
-         "puae_cpu_compatibility",
-         "System > CPU Compatibility",
-         "CPU Compatibility",
-         "Some games have graphic and/or speed issues without 'Cycle-exact'. 'Cycle-exact' can be forced with '(CE)' file path tag. (DMA/Memory) is forced to (Full) with 68000.",
+         "puae_cpu_data_cache",
+         "CPU > 68030 Data Cache",
+         "68030 Data Cache",
+         "Emulates the 68030 data cache, needed by a few programs that rely on it. Slower. Only with 68030 and 'CPU Compatibility' more compatible or cycle-exact.\nCore restart required.",
          NULL,
-         "system",
+         "cpu",
          {
-            { "normal", "Normal" },
-            { "compatible", "More compatible" },
-            { "memory", "Cycle-exact (DMA/Memory)" },
-            { "exact", "Cycle-exact (Full)" },
+            { "disabled", NULL },
+            { "enabled", NULL },
             { NULL, NULL },
          },
-#if defined(__x86_64__)
-         "exact"
-#else
-         "normal"
-#endif
+         "disabled"
+      },
+      {
+         "puae_chipmem_size",
+         "Memory > Chip RAM",
+         "Chip RAM",
+         "'Automatic' defaults to the current preset model.\nCore reset required.",
+         NULL,
+         "memory",
+         {
+            { "auto", "Automatic" },
+            { "1", "0.5M" },
+            { "2", "1M" },
+            { "3", "1.5M" },
+            { "4", "2M" },
+            { NULL, NULL },
+         },
+         "auto"
+      },
+      {
+         "puae_bogomem_size",
+         "Memory > Slow RAM",
+         "Slow RAM",
+         "'Automatic' defaults to the current preset model.\nCore reset required.",
+         NULL,
+         "memory",
+         {
+            { "auto", "Automatic" },
+            { "0", "None" },
+            { "2", "0.5M" },
+            { "4", "1M" },
+            { "6", "1.5M" },
+            { "7", "1.8M" },
+            { NULL, NULL },
+         },
+         "auto"
+      },
+      {
+         "puae_fastmem_size",
+         "Memory > Z2 Fast RAM",
+         "Z2 Fast RAM",
+         "'Automatic' defaults to the current preset model.\nCore reset required.",
+         NULL,
+         "memory",
+         {
+            { "auto", "Automatic" },
+            { "0", "None" },
+            { "1", "1M" },
+            { "2", "2M" },
+            { "4", "4M" },
+            { "8", "8M" },
+            { NULL, NULL },
+         },
+         "auto"
+      },
+      {
+         "puae_z3mem_size",
+         "Memory > Z3 Fast RAM",
+         "Z3 Fast RAM",
+         "'Automatic' defaults to the current preset model.\nCore reset required.",
+         NULL,
+         "memory",
+         {
+            { "auto", "Automatic" },
+            { "0", "None" },
+            { "1", "1M" },
+            { "2", "2M" },
+            { "4", "4M" },
+            { "8", "8M" },
+            { "16", "16M" },
+            { "32", "32M" },
+            { "64", "64M" },
+            { "128", "128M" },
+            { "256", "256M" },
+            { "512", "512M" },
+            { NULL, NULL },
+         },
+         "auto"
+      },
+      {
+         "puae_cpuboard",
+         "Expansions > Accelerator Board",
+         "Accelerator Board",
+         "CPU board for the trapdoor or CPU slot, with its CPU, memory and boot ROM. Needs the board ROM in the system directory (any name, found by checksum). The CPU follows the board; on 68040/68060 boards 'CPU Model' chooses between the two (default: the board CPU).\nCore restart required.",
+         NULL,
+         "expansion",
+         {
+            { "none", "disabled" },
+            { "GVPA530", "GVP A530 (A500, 68030)" },
+            { "e-matrix530", "M-Tec E-Matrix 530 (A500 KS2.0+, 68030)" },
+            { "tqm", "Hardital TQM (A500, 68030)" },
+            { "golem030", "Kupke Golem 030 (A500, 68030)" },
+            { "typhoon2", "DCE Typhoon MK2 (A500 KS2.0+, 68030)" },
+            { "Apollo630", "Apollo 630 (A600, 68040)" },
+            { "Blizzard1230II", "Blizzard 1230 I/II (A1200, 68030)" },
+            { "Blizzard1230III", "Blizzard 1230 III (A1200, 68030)" },
+            { "Blizzard1230IV", "Blizzard 1230 IV (A1200, 68030)" },
+            { "Blizzard1260", "Blizzard 1240/1260 (A1200, 68040/68060)" },
+            { "A1230SI", "GVP A1230 Turbo+ (A1200, 68030)" },
+            { "A1230SII", "GVP A1230 Turbo+ Series II (A1200, 68030)" },
+            { "Apollo", "Apollo 1240/1260 (A1200, 68040/68060)" },
+            { "DKB12x0", "DKB 1230/1240/Cobra (A1200, 68030)" },
+            { "Magnum40", "CSA Magnum 40 (A2000, 68040)" },
+            { "GVPGFORCE030", "GVP G-Force 030 (A2000, 68030)" },
+            { "GVPGFORCE040", "GVP G-Force 040 (A2000, 68040/68060)" },
+            { "A3001SI", "GVP A3001 Series I (A2000, 68030)" },
+            { "A2630", "Commodore A2620/A2630 (A2000, 68020/68030)" },
+            { "Blizzard2060", "Blizzard 2060 (A2000, 68040/68060)" },
+            { "TekMagic", "TekMagic 2040/2060 (A2000, 68040/68060)" },
+            { "Zeus", "PP&S Zeus 040 (A2000, 68040/68060)" },
+            { "CyberStormMK1", "CyberStorm MK I (A3000/A4000, 68040/68060)" },
+            { "CyberStormMK2", "CyberStorm MK II (A3000/A4000, 68040/68060)" },
+            { "CyberStormMK3", "CyberStorm MK III (A3000/A4000, 68040/68060)" },
+            { "Falcon040", "MacroSystem Falcon 040 (A3000/A4000, 68040/68060)" },
+            { "WarpEngineA4000", "MacroSystem Warp Engine (A4000, 68040/68060)" },
+            { "quikpak", "QuikPak 4060 (A4000, 68060)" },
+            { "sx32pro", "DCE SX32 Pro (CD32, 68030)" },
+            { NULL, NULL },
+         },
+         "none"
+      },
+      {
+         "puae_cpuboard_mem",
+         "Expansions > Accelerator Memory",
+         "Accelerator Memory",
+         "Fast RAM on the accelerator board, limited to what the board supports.\nCore restart required.",
+         NULL,
+         "expansion",
+         {
+            { "auto", "Automatic" },
+            { "0", "None" },
+            { "4", "4MB" },
+            { "8", "8MB" },
+            { "16", "16MB" },
+            { "32", "32MB" },
+            { "64", "64MB" },
+            { "128", "128MB" },
+            { "256", "256MB" },
+            { NULL, NULL },
+         },
+         "auto"
+      },
+      {
+         "puae_cart_file",
+         "Expansions > Cartridge",
+         "Cartridge",
+         "Cartridge images go in 'system/uae/' or 'system/uae_data/'.\nCore restart required.",
+         NULL,
+         "expansion",
+         {
+            /* Options filled dynamically later */
+            { NULL, NULL },
+         },
+         NULL
+      },
+      {
+         "puae_keyboard_type",
+         "Expansions > Keyboard Type",
+         "Keyboard Type",
+         "'UAE' sends keys straight to the Amiga. The other types emulate the keyboard microcontroller, including its timing and key rollover, and need its ROM dump in the system directory: 6570-036 (2KB, CRC32 4a3fc332), 68HC05 (8KB, 2a77eec4) or D8039HLC (2KB, c23d280e or fb92a773). Without the ROM 'UAE' is used. 'Automatic' picks the keyboard of the model.\nCore restart required.",
+         NULL,
+         "expansion",
+         {
+            { "uae", "UAE" },
+            { "auto", "Automatic" },
+            { "a500_6570-036", "A500 (6570-036)" },
+            { "a600_6570-036", "A600 (6570-036)" },
+            { "a1000_6570-036", "A1000 (6570-036)" },
+            { "ax000_6570-036", "A2000/A3000/A4000 (6570-036)" },
+            { "a1200_6805", "A1200 (68HC05)" },
+            { "a2000_8039", "A2000 (D8039HLC)" },
+            { NULL, NULL },
+         },
+         "uae"
+      },
+      {
+         "puae_keyboard_rollover",
+         "Expansions > Keyboard Rollover",
+         "Keyboard Rollover",
+         "With a microcontroller 'Keyboard Type': 'N-key' reports every key held, 'Original' emulates the key matrix without diodes, including its ghost keys.",
+         NULL,
+         "expansion",
+         {
+            { "nkro", "N-key" },
+            { "matrix", "Original" },
+            { NULL, NULL },
+         },
+         "nkro"
       },
       {
          "puae_immediate_blits",
-         "System > Immediate/Waiting Blits",
+         "Chipset > Immediate/Waiting Blits",
          "Immediate/Waiting Blits",
          "- 'Immediate Blitter': Faster but less compatible blitter emulation.\n- 'Wait for Blitter': Compatibility hack for programs that don't wait for the blitter correctly.",
          NULL,
-         "system",
+         "chipset",
          {
             { "false", "disabled" },
             { "immediate", "Immediate Blitter" },
@@ -1135,11 +1359,11 @@ static void retro_set_core_options()
       },
       {
          "puae_collision_level",
-         "System > Collision Level",
+         "Chipset > Collision Level",
          "Collision Level",
          "'Sprites and Playfields' is recommended.",
          NULL,
-         "system",
+         "chipset",
          {
             { "none", "None" },
             { "sprites", "Sprites only" },
@@ -1148,6 +1372,21 @@ static void retro_set_core_options()
             { NULL, NULL },
          },
          "playfields"
+      },
+      {
+         "puae_display_optimizations",
+         "Chipset > Display Optimizations",
+         "Display Optimizations",
+         "Shortcuts of the WinUAE 6 display emulation, such as reusing lines that did not change since the previous frame. 'Full' is the fastest, 'Partial' and 'None' trade speed for accuracy in the rare programs that show display glitches. The difference is largest when 'CPU Compatibility' is not cycle-exact.",
+         NULL,
+         "chipset",
+         {
+            { "full", "Full" },
+            { "partial", "Partial" },
+            { "none", "None" },
+            { NULL, NULL },
+         },
+         "full"
       },
       {
          "puae_autoloadfastforward",
@@ -1226,38 +1465,30 @@ static void retro_set_core_options()
          "disabled"
       },
       {
-         "puae_cd_speed",
-         "Media > CD Speed",
-         "CD Speed",
-         "Transfer rate in CD32 is 300KB/s (double-speed), CDTV is 150KB/s (single-speed). 'Turbo' removes seek delay emulation.",
-         NULL,
-         "media",
-         {
-            { "100", "Default" },
-            { "0", "Turbo" },
-            { NULL, NULL },
-         },
-         "100"
-      },
-      {
-         "puae_cd_startup_delayed_insert",
-         "Media > CD Startup Delayed Insert",
-         "CD Startup Delayed Insert",
-         "Some games fail to load if CD32/CDTV is powered on with CD inserted. 'ON' inserts CD during boot animation.",
+         "puae_use_boot_hd",
+         "Media > Global Boot HD",
+         "Global Boot HD",
+         "Attach a hard disk for Workbench, not for WHDLoad! Enabling forces HD interface model. CD launch enables AmigaCD mode. HDF size change will not alter existing HDFs.\nCore restart required.",
          NULL,
          "media",
          {
             { "disabled", NULL },
-            { "enabled", NULL },
+            { "files", "Files" },
+            { "hdf20", "HDF 20MB" },
+            { "hdf40", "HDF 40MB" },
+            { "hdf80", "HDF 80MB" },
+            { "hdf128", "HDF 128MB" },
+            { "hdf256", "HDF 256MB" },
+            { "hdf512", "HDF 512MB" },
             { NULL, NULL },
          },
          "disabled"
       },
       {
-         "puae_shared_nvram",
-         "Media > CD32/CDTV Shared NVRAM",
-         "CD32/CDTV Shared NVRAM",
-         "'OFF' saves separate files per content. Starting without content uses the shared file. CD32 and CDTV use separate shared files.\nCore restart required.",
+         "puae_harddrive_write_protect",
+         "Media > Hard Drive Write Protection",
+         "Hard Drive Write Protection",
+         "Mounts every hard drive image and directory read-only.\nCore restart required.",
          NULL,
          "media",
          {
@@ -1340,37 +1571,46 @@ static void retro_set_core_options()
          "disabled"
       },
       {
-         "puae_use_boot_hd",
-         "Media > Global Boot HD",
-         "Global Boot HD",
-         "Attach a hard disk for Workbench, not for WHDLoad! Enabling forces HD interface model. CD launch enables AmigaCD mode. HDF size change will not alter existing HDFs.\nCore restart required.",
+         "puae_cd_speed",
+         "Media > CD Speed",
+         "CD Speed",
+         "Transfer rate in CD32 is 300KB/s (double-speed), CDTV is 150KB/s (single-speed). 'Turbo' removes seek delay emulation.",
+         NULL,
+         "media",
+         {
+            { "100", "Default" },
+            { "0", "Turbo" },
+            { NULL, NULL },
+         },
+         "100"
+      },
+      {
+         "puae_cd_startup_delayed_insert",
+         "Media > CD Startup Delayed Insert",
+         "CD Startup Delayed Insert",
+         "Some games fail to load if CD32/CDTV is powered on with CD inserted. 'ON' inserts CD during boot animation.",
          NULL,
          "media",
          {
             { "disabled", NULL },
-            { "files", "Files" },
-            { "hdf20", "HDF 20MB" },
-            { "hdf40", "HDF 40MB" },
-            { "hdf80", "HDF 80MB" },
-            { "hdf128", "HDF 128MB" },
-            { "hdf256", "HDF 256MB" },
-            { "hdf512", "HDF 512MB" },
+            { "enabled", NULL },
             { NULL, NULL },
          },
          "disabled"
       },
       {
-         "puae_cart_file",
-         "Media > Cartridge",
-         "Cartridge",
-         "Cartridge images go in 'system/uae/' or 'system/uae_data/'.\nCore restart required.",
+         "puae_shared_nvram",
+         "Media > CD32/CDTV Shared NVRAM",
+         "CD32/CDTV Shared NVRAM",
+         "'OFF' saves separate files per content. Starting without content uses the shared file. CD32 and CDTV use separate shared files.\nCore restart required.",
          NULL,
          "media",
          {
-            /* Options filled dynamically later */
+            { "disabled", NULL },
+            { "enabled", NULL },
             { NULL, NULL },
          },
-         NULL
+         "disabled"
       },
       {
          "puae_video_options_display",
@@ -1400,22 +1640,6 @@ static void retro_set_core_options()
             { NULL, NULL },
          },
          "locked"
-      },
-      {
-         "puae_video_standard",
-         "Video > Standard",
-         "Standard",
-         "Output Hz & height:\n- 'PAL': 50Hz - 288px / 576px\n- 'NTSC': 60Hz - 240px / 480px\n- 'Automatic' switches region per file path tags.",
-         NULL,
-         "video",
-         {
-            { "PAL auto", "Automatic PAL" },
-            { "NTSC auto", "Automatic NTSC" },
-            { "PAL", NULL },
-            { "NTSC", NULL },
-            { NULL, NULL },
-         },
-         "PAL auto"
       },
       {
          "puae_video_aspect",
@@ -1548,6 +1772,51 @@ static void retro_set_core_options()
          "auto"
       },
       {
+         "puae_video_interlace_mode",
+         "Video > Interlaced Line Mode",
+         "Interlaced Line Mode",
+         "How interlaced screens are shown when 'Line Mode' is double:\n- 'Double, fields': both fields woven together, updated every field.\n- 'Double, frames': both fields woven together, updated only on complete frames.\n- 'Double, fields+': each field alone, the lines of the other field black, like an interlaced monitor (best at 50/60 Hz, with a CRT shader).",
+         NULL,
+         "video",
+         {
+            { "fields", "Double, fields" },
+            { "frames", "Double, frames" },
+            { "fields_plus", "Double, fields+" },
+            { NULL, NULL },
+         },
+         "fields"
+      },
+      {
+         "puae_video_progressive_mode",
+         "Video > Progressive Line Mode",
+         "Progressive Line Mode",
+         "How non-interlaced screens are shown when 'Line Mode' is double:\n- 'Double': every line drawn twice.\n- 'Scanlines': every second line black.\n- 'Double, fields': like an interlaced monitor showing a progressive picture, alternating the lines every frame.\n- 'Double, fields+': same, with the other lines always black.",
+         NULL,
+         "video",
+         {
+            { "double", "Double" },
+            { "scanlines", "Scanlines" },
+            { "fields", "Double, fields" },
+            { "fields_plus", "Double, fields+" },
+            { NULL, NULL },
+         },
+         "double"
+      },
+      {
+         "puae_gfx_lores_filtered",
+         "Video > Filtered Low Resolution",
+         "Filtered Low Resolution",
+         "When a screen has a higher resolution than the output 'Resolution' (e.g. hires shown at lores, superhires at hires), blends the pixels that do not fit instead of skipping them.",
+         NULL,
+         "video",
+         {
+            { "disabled", NULL },
+            { "enabled", NULL },
+            { NULL, NULL },
+         },
+         "disabled"
+      },
+      {
          "puae_gfx_flickerfixer",
          "Video > Remove Interlace Artifacts",
          "Remove Interlace Artifacts",
@@ -1618,130 +1887,6 @@ static void retro_set_core_options()
 #endif
       },
       {
-         "puae_vkbd_theme",
-         "OSD > Virtual KBD Theme",
-         "Virtual KBD Theme",
-         "The keyboard comes up with RetroPad Select by default.",
-         NULL,
-         "osd",
-         {
-            { "auto", "Automatic (shadow)" },
-            { "auto_outline", "Automatic (outline)" },
-            { "beige", "Beige (shadow)" },
-            { "beige_outline", "Beige (outline)" },
-            { "cd32", "CD32 (shadow)" },
-            { "cd32_outline", "CD32 (outline)" },
-            { "light", "Light (shadow)" },
-            { "light_outline", "Light (outline)" },
-            { "dark", "Dark (shadow)" },
-            { "dark_outline", "Dark (outline)" },
-            { NULL, NULL },
-         },
-         "auto"
-      },
-      {
-         "puae_vkbd_transparency",
-         "OSD > Virtual KBD Transparency",
-         "Virtual KBD Transparency",
-         "Keyboard transparency can be toggled with RetroPad A.",
-         NULL,
-         "osd",
-         {
-            { "0%",   NULL },
-            { "25%",  NULL },
-            { "50%",  NULL },
-            { "75%",  NULL },
-            { "100%", NULL },
-            { NULL, NULL },
-         },
-         "25%"
-      },
-      {
-         "puae_vkbd_dimming",
-         "OSD > Virtual KBD Dimming",
-         "Virtual KBD Dimming",
-         "Dimming level of the surrounding area.",
-         NULL,
-         "osd",
-         {
-            { "0%",   NULL },
-            { "25%",  NULL },
-            { "50%",  NULL },
-            { "75%",  NULL },
-            { "100%", NULL },
-            { NULL, NULL },
-         },
-         "25%"
-      },
-      {
-         "puae_statusbar",
-         "OSD > Statusbar Mode",
-         "Statusbar Mode",
-         "- 'Full': Joyports + Messages + LEDs\n- 'Basic': Messages + LEDs\n- 'Minimal': LED colors only",
-         NULL,
-         "osd",
-         {
-            { "bottom", "Bottom Full" },
-            { "bottom_minimal", "Bottom Full Minimal" },
-            { "bottom_basic", "Bottom Basic" },
-            { "bottom_basic_minimal", "Bottom Basic Minimal" },
-            { "top", "Top Full" },
-            { "top_minimal", "Top Full Minimal" },
-            { "top_basic", "Top Basic" },
-            { "top_basic_minimal", "Top Basic Minimal" },
-            { NULL, NULL },
-         },
-         "bottom"
-      },
-      {
-         "puae_statusbar_startup",
-         "OSD > Statusbar Startup",
-         "Statusbar Startup",
-         "Show statusbar on startup.",
-         NULL,
-         "osd",
-         {
-            { "disabled", NULL },
-            { "enabled", NULL },
-            { NULL, NULL },
-         },
-         "disabled"
-      },
-      {
-         "puae_statusbar_messages",
-         "OSD > Statusbar Messages",
-         "Statusbar Messages",
-         "Show messages when statusbar is hidden.",
-         NULL,
-         "osd",
-         {
-            { "disabled", NULL },
-            { "enabled", NULL },
-            { NULL, NULL },
-         },
-         "disabled"
-      },
-      {
-         "puae_joyport_pointer_color",
-         "OSD > Light Pen/Gun Pointer Color",
-         "Light Pen/Gun Pointer Color",
-         "Crosshair color for light pens and guns.",
-         NULL,
-         "osd",
-         {
-            { "disabled", NULL },
-            { "black", "Black" },
-            { "white", "White" },
-            { "red", "Red" },
-            { "green", "Green" },
-            { "blue", "Blue" },
-            { "yellow", "Yellow" },
-            { "purple", "Purple" },
-            { NULL, NULL },
-         },
-         "blue"
-      },
-      {
          "puae_audio_options_display",
          "Show Audio Options",
          NULL,
@@ -1777,6 +1922,43 @@ static void retro_set_core_options()
             { NULL, NULL },
          },
          "100%"
+      },
+      {
+         "puae_sound_stereo_delay",
+         "Audio > Stereo Delay",
+         "Stereo Delay",
+         "Mixes each channel with the other one as it was a moment earlier, for a wider, headphone friendly stereo image. Only with 'Stereo Separation' below 100%. Does not affect CD audio.",
+         NULL,
+         "audio",
+         {
+            { "disabled", NULL },
+            { "1", NULL },
+            { "2", NULL },
+            { "3", NULL },
+            { "4", NULL },
+            { "5", NULL },
+            { "6", NULL },
+            { "7", NULL },
+            { "8", NULL },
+            { "9", NULL },
+            { "10", NULL },
+            { NULL, NULL },
+         },
+         "disabled"
+      },
+      {
+         "puae_sound_stereo_swap",
+         "Audio > Swap Stereo Channels",
+         "Swap Stereo Channels",
+         "Swaps the left and right Paula channels. Does not affect CD audio.",
+         NULL,
+         "audio",
+         {
+            { "disabled", NULL },
+            { "enabled", NULL },
+            { NULL, NULL },
+         },
+         "disabled"
       },
       {
          "puae_sound_interpol",
@@ -1969,7 +2151,7 @@ static void retro_set_core_options()
          ANALOG_STICK_SPEED_OPTIONS,
          "1.0"
       },
-	  {
+      {
          "puae_analogmouse_speed_right",
          "Input > Right Analog Stick Mouse Speed",
          "Right Analog Stick Mouse Speed",
@@ -2062,6 +2244,120 @@ static void retro_set_core_options()
          {
             { "disabled", NULL },
             { "enabled", NULL },
+            { NULL, NULL },
+         },
+         "disabled"
+      },
+      {
+         "puae_turbo_fire",
+         "RetroPad > Turbo Fire",
+         "Turbo Fire",
+         "Hotkey toggling disables this option until core restart.",
+         NULL,
+         "input",
+         {
+            { "disabled", NULL },
+            { "enabled", NULL },
+            { NULL, NULL },
+         },
+         "disabled"
+      },
+      {
+         "puae_turbo_fire_button",
+         "RetroPad > Turbo Button",
+         "Turbo Button",
+         "Replace the mapped button with turbo fire button.",
+         NULL,
+         "input",
+         {
+            { "B", "RetroPad B" },
+            { "A", "RetroPad A" },
+            { "Y", "RetroPad Y" },
+            { "X", "RetroPad X" },
+            { "L", "RetroPad L" },
+            { "R", "RetroPad R" },
+            { "L2", "RetroPad L2" },
+            { "R2", "RetroPad R2" },
+            { NULL, NULL },
+         },
+         "B"
+      },
+      {
+         "puae_turbo_pulse",
+         "RetroPad > Turbo Pulse",
+         "Turbo Pulse",
+         "Frames in a button cycle.\n- '2' = 1 frame down, 1 frame up\n- '4' = 2 frames down, 2 frames up\n- '6' = 3 frames down, 3 frames up\netc.",
+         NULL,
+         "input",
+         {
+            { "2", "2 frames" },
+            { "4", "4 frames" },
+            { "6", "6 frames" },
+            { "8", "8 frames" },
+            { "10", "10 frames" },
+            { "12", "12 frames" },
+            { NULL, NULL },
+         },
+         "6"
+      },
+      {
+         "puae_joyport",
+         "RetroPad > Joystick/Mouse",
+         "Joystick/Mouse",
+         "Change D-Pad control between joyports. Hotkey toggling disables this option until core restart.",
+         NULL,
+         "input",
+         {
+            { "joystick", "Joystick (Port 1)" },
+            { "mouse", "Mouse (Port 2)" },
+            { NULL, NULL },
+         },
+         "Joystick"
+      },
+      {
+         "puae_joyport_order",
+         "RetroPad > Joystick Port Order",
+         "Joystick Port Order",
+         "Plug RetroPads in different ports. Useful for 4-player adapters.",
+         NULL,
+         "input",
+         {
+            { "1234", "1-2-3-4" },
+            { "2143", "2-1-4-3" },
+            { "3412", "3-4-1-2" },
+            { "4321", "4-3-2-1" },
+            { NULL, NULL },
+         },
+         "1234"
+      },
+      {
+         "puae_retropad_options",
+         "RetroPad > Face Button Options",
+         "RetroPad Face Button Options",
+         "Rotate face buttons clockwise and/or make 2nd fire press up.",
+         NULL,
+         "input",
+         {
+            { "disabled", "B = Fire, A = 2nd fire" },
+            { "jump", "B = Fire, A = Up" },
+            { "rotate", "Y = Fire, B = 2nd fire" },
+            { "rotate_jump", "Y = Fire, B = Up" },
+            { NULL, NULL },
+         },
+         "disabled"
+      },
+      {
+         "puae_cd32pad_options",
+         "CD32 Pad > Face Button Options",
+         "CD32 Pad Face Button Options",
+         "Rotate face buttons clockwise and/or make blue button press up.",
+         NULL,
+         "input",
+         {
+            { "disabled", "B = Red, A = Blue" },
+            { "jump", "B = Red, A = Up" },
+            { "rotate", "Y = Red, B = Blue" },
+            { "rotate_jump", "Y = Red, B = Up" },
             { NULL, NULL },
          },
          "disabled"
@@ -2405,12 +2701,88 @@ static void retro_set_core_options()
          "---"
       },
       {
-         "puae_turbo_fire",
-         "RetroPad > Turbo Fire",
-         "Turbo Fire",
-         "Hotkey toggling disables this option until core restart.",
+         "puae_vkbd_theme",
+         "OSD > Virtual KBD Theme",
+         "Virtual KBD Theme",
+         "The keyboard comes up with RetroPad Select by default.",
          NULL,
-         "input",
+         "osd",
+         {
+            { "auto", "Automatic (shadow)" },
+            { "auto_outline", "Automatic (outline)" },
+            { "beige", "Beige (shadow)" },
+            { "beige_outline", "Beige (outline)" },
+            { "cd32", "CD32 (shadow)" },
+            { "cd32_outline", "CD32 (outline)" },
+            { "light", "Light (shadow)" },
+            { "light_outline", "Light (outline)" },
+            { "dark", "Dark (shadow)" },
+            { "dark_outline", "Dark (outline)" },
+            { NULL, NULL },
+         },
+         "auto"
+      },
+      {
+         "puae_vkbd_transparency",
+         "OSD > Virtual KBD Transparency",
+         "Virtual KBD Transparency",
+         "Keyboard transparency can be toggled with RetroPad A.",
+         NULL,
+         "osd",
+         {
+            { "0%",   NULL },
+            { "25%",  NULL },
+            { "50%",  NULL },
+            { "75%",  NULL },
+            { "100%", NULL },
+            { NULL, NULL },
+         },
+         "25%"
+      },
+      {
+         "puae_vkbd_dimming",
+         "OSD > Virtual KBD Dimming",
+         "Virtual KBD Dimming",
+         "Dimming level of the surrounding area.",
+         NULL,
+         "osd",
+         {
+            { "0%",   NULL },
+            { "25%",  NULL },
+            { "50%",  NULL },
+            { "75%",  NULL },
+            { "100%", NULL },
+            { NULL, NULL },
+         },
+         "25%"
+      },
+      {
+         "puae_statusbar",
+         "OSD > Statusbar Mode",
+         "Statusbar Mode",
+         "- 'Full': Joyports + Messages + LEDs\n- 'Basic': Messages + LEDs\n- 'Minimal': LED colors only",
+         NULL,
+         "osd",
+         {
+            { "bottom", "Bottom Full" },
+            { "bottom_minimal", "Bottom Full Minimal" },
+            { "bottom_basic", "Bottom Basic" },
+            { "bottom_basic_minimal", "Bottom Basic Minimal" },
+            { "top", "Top Full" },
+            { "top_minimal", "Top Full Minimal" },
+            { "top_basic", "Top Basic" },
+            { "top_basic_minimal", "Top Basic Minimal" },
+            { NULL, NULL },
+         },
+         "bottom"
+      },
+      {
+         "puae_statusbar_startup",
+         "OSD > Statusbar Startup",
+         "Statusbar Startup",
+         "Show statusbar on startup.",
+         NULL,
+         "osd",
          {
             { "disabled", NULL },
             { "enabled", NULL },
@@ -2419,104 +2791,38 @@ static void retro_set_core_options()
          "disabled"
       },
       {
-         "puae_turbo_fire_button",
-         "RetroPad > Turbo Button",
-         "Turbo Button",
-         "Replace the mapped button with turbo fire button.",
+         "puae_statusbar_messages",
+         "OSD > Statusbar Messages",
+         "Statusbar Messages",
+         "Show messages when statusbar is hidden.",
          NULL,
-         "input",
+         "osd",
          {
-            { "B", "RetroPad B" },
-            { "A", "RetroPad A" },
-            { "Y", "RetroPad Y" },
-            { "X", "RetroPad X" },
-            { "L", "RetroPad L" },
-            { "R", "RetroPad R" },
-            { "L2", "RetroPad L2" },
-            { "R2", "RetroPad R2" },
-            { NULL, NULL },
-         },
-         "B"
-      },
-      {
-         "puae_turbo_pulse",
-         "RetroPad > Turbo Pulse",
-         "Turbo Pulse",
-         "Frames in a button cycle.\n- '2' = 1 frame down, 1 frame up\n- '4' = 2 frames down, 2 frames up\n- '6' = 3 frames down, 3 frames up\netc.",
-         NULL,
-         "input",
-         {
-            { "2", "2 frames" },
-            { "4", "4 frames" },
-            { "6", "6 frames" },
-            { "8", "8 frames" },
-            { "10", "10 frames" },
-            { "12", "12 frames" },
-            { NULL, NULL },
-         },
-         "6"
-      },
-      {
-         "puae_joyport",
-         "RetroPad > Joystick/Mouse",
-         "Joystick/Mouse",
-         "Change D-Pad control between joyports. Hotkey toggling disables this option until core restart.",
-         NULL,
-         "input",
-         {
-            { "joystick", "Joystick (Port 1)" },
-            { "mouse", "Mouse (Port 2)" },
-            { NULL, NULL },
-         },
-         "Joystick"
-      },
-      {
-         "puae_joyport_order",
-         "RetroPad > Joystick Port Order",
-         "Joystick Port Order",
-         "Plug RetroPads in different ports. Useful for 4-player adapters.",
-         NULL,
-         "input",
-         {
-            { "1234", "1-2-3-4" },
-            { "2143", "2-1-4-3" },
-            { "3412", "3-4-1-2" },
-            { "4321", "4-3-2-1" },
-            { NULL, NULL },
-         },
-         "1234"
-      },
-      {
-         "puae_retropad_options",
-         "RetroPad > Face Button Options",
-         "RetroPad Face Button Options",
-         "Rotate face buttons clockwise and/or make 2nd fire press up.",
-         NULL,
-         "input",
-         {
-            { "disabled", "B = Fire, A = 2nd fire" },
-            { "jump", "B = Fire, A = Up" },
-            { "rotate", "Y = Fire, B = 2nd fire" },
-            { "rotate_jump", "Y = Fire, B = Up" },
+            { "disabled", NULL },
+            { "enabled", NULL },
             { NULL, NULL },
          },
          "disabled"
       },
       {
-         "puae_cd32pad_options",
-         "CD32 Pad > Face Button Options",
-         "CD32 Pad Face Button Options",
-         "Rotate face buttons clockwise and/or make blue button press up.",
+         "puae_joyport_pointer_color",
+         "OSD > Light Pen/Gun Pointer Color",
+         "Light Pen/Gun Pointer Color",
+         "Crosshair color for light pens and guns.",
          NULL,
-         "input",
+         "osd",
          {
-            { "disabled", "B = Red, A = Blue" },
-            { "jump", "B = Red, A = Up" },
-            { "rotate", "Y = Red, B = Blue" },
-            { "rotate_jump", "Y = Red, B = Up" },
+            { "disabled", NULL },
+            { "black", "Black" },
+            { "white", "White" },
+            { "red", "Red" },
+            { "green", "Green" },
+            { "blue", "Blue" },
+            { "yellow", "Yellow" },
+            { "purple", "Purple" },
             { NULL, NULL },
          },
-         "disabled"
+         "blue"
       },
       { NULL, NULL, NULL, NULL, NULL, NULL, {{0}}, NULL },
    };
@@ -3133,7 +3439,31 @@ static void retro_set_options_display(void)
    environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
    option_display.key = "puae_immediate_blits";
    environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
+   option_display.key = "puae_display_optimizations";
+   environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
+   option_display.key = "puae_keyboard_type";
+   environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
+   option_display.key = "puae_keyboard_rollover";
+   environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
+   option_display.key = "puae_chipset";
+   environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
+   option_display.key = "puae_rtc";
+   environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
+   option_display.key = "puae_cpu_data_cache";
+   environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
+   option_display.key = "puae_cpuboard";
+   environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
+   option_display.key = "puae_cpuboard_mem";
+   environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
+   option_display.key = "puae_harddrive_write_protect";
+   environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
    option_display.key = "puae_gfx_flickerfixer";
+   environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
+   option_display.key = "puae_video_interlace_mode";
+   environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
+   option_display.key = "puae_video_progressive_mode";
+   environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
+   option_display.key = "puae_gfx_lores_filtered";
    environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
    option_display.key = "puae_gfx_framerate";
    environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
@@ -3158,6 +3488,10 @@ static void retro_set_options_display(void)
    option_display.visible = opt_audio_options_display;
 
    option_display.key = "puae_sound_stereo_separation";
+   environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
+   option_display.key = "puae_sound_stereo_delay";
+   environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
+   option_display.key = "puae_sound_stereo_swap";
    environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
    option_display.key = "puae_sound_interpol";
    environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
@@ -3391,6 +3725,7 @@ static void update_variables(void)
             : preset_opt.chipset == 1 ? CSMASK_ECS_AGNUS
             : preset_opt.chipset == 2 ? CSMASK_ECS_DENISE
             : preset_opt.chipset == 3 ? CSMASK_ECS_DENISE | CSMASK_ECS_AGNUS
+            : preset_opt.chipset == 5 ? CSMASK_A1000
             : CSMASK_AGA | CSMASK_ECS_DENISE | CSMASK_ECS_AGNUS);
 
          changed_prefs.cs_compatible = currprefs.cs_compatible = preset_opt.cs_compatible;
@@ -3953,12 +4288,46 @@ static void update_variables(void)
 
    GET_VAR("cpu_throttle")
    {
-      strcat(uae_config, "cpu_throttle=");
-      strcat(uae_config, var.value);
-      strcat(uae_config, "\n");
+      /* "max": WinUAE "fastest possible", the CPU gets all the host time
+       * left in each frame (not with cycle-exact). It needs the frontend
+       * clock: without it the CPU time budget of a frame would never end. */
+      bool max = !strcmp(var.value, "max") && perf_cb.get_time_usec;
+
+      const char *throttle = strcmp(var.value, "max") ? var.value : "0.0";
+
+      /* Warn (once per combination) when the speed setting has no effect:
+       * "Max" needs a non cycle-exact memory model, any throttle needs
+       * a CPU that is not fully cycle-exact. */
+      {
+         static int warned = 0;
+         struct retro_variable cv = { "puae_cpu_compatibility", NULL };
+         bool ce  = environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &cv) && cv.value && !strcmp(cv.value, "exact");
+         bool mce = ce || (cv.value && !strcmp(cv.value, "memory"));
+         int state = (!strcmp(var.value, "max") && mce) ? 1
+                   : (ce && atof(throttle) != 0.0) ? 2 : 0;
+         if (state && state != warned)
+         {
+            snprintf(retro_message_msg, sizeof(retro_message_msg),
+                  "CPU Speed '%s' has no effect with CPU Compatibility '%s': use 'Normal' or 'More compatible'.",
+                  strcmp(var.value, "max") ? throttle : "Max",
+                  ce ? "Cycle-exact" : "Memory cycle-exact");
+            retro_message = true;
+         }
+         warned = state;
+      }
+
+      strcat(uae_config, max ? "cpu_speed=max\ncpu_throttle=0.0\n" : "cpu_speed=real\ncpu_throttle=");
+      if (!max)
+      {
+         strcat(uae_config, throttle);
+         strcat(uae_config, "\n");
+      }
 
       if (libretro_runloop_active)
-         changed_prefs.m68k_speed_throttle = atof(var.value);
+      {
+         changed_prefs.m68k_speed          = max ? -1 : 0;
+         changed_prefs.m68k_speed_throttle = max ? 0 : atof(throttle);
+      }
    }
 
    GET_VAR("cpu_multiplier")
@@ -3983,6 +4352,26 @@ static void update_variables(void)
 
       if (libretro_runloop_active)
          changed_prefs.sound_stereo_separation = val;
+   }
+
+   GET_VAR("sound_stereo_delay")
+   {
+      int val = strcmp(var.value, "disabled") ? atoi(var.value) : 0;
+      char valbuf[32];
+      snprintf(valbuf, sizeof(valbuf), "sound_stereo_mixing_delay=%d\n", val);
+      strcat(uae_config, valbuf);
+
+      if (libretro_runloop_active)
+         changed_prefs.sound_mixed_stereo_delay = val;
+   }
+
+   GET_VAR("sound_stereo_swap")
+   {
+      bool val = !strcmp(var.value, "enabled");
+      strcat(uae_config, val ? "sound_stereo_swap_paula=true\n" : "sound_stereo_swap_paula=false\n");
+
+      if (libretro_runloop_active)
+         changed_prefs.sound_stereo_swap_paula = val;
    }
 
    GET_VAR("sound_interpol")
@@ -4293,6 +4682,96 @@ static void update_variables(void)
       }
    }
 
+   GET_VAR("keyboard_rollover")
+   {
+      bool val = strcmp(var.value, "matrix") != 0;
+      strcat(uae_config, val ? "keyboard_nkro=true\n" : "keyboard_nkro=false\n");
+
+      if (libretro_runloop_active)
+         changed_prefs.keyboard_nkro = val;
+   }
+
+   /* Chipset and RTC overrides: written after the model configuration, and
+    * applied again while running, because the "model" option above restores
+    * the model defaults (built_in_chipset_prefs) whenever options are read. */
+   GET_VAR("chipset")
+   {
+      if (strcmp(var.value, "auto"))
+      {
+         strcat(uae_config, "chipset=");
+         strcat(uae_config, var.value);
+         strcat(uae_config, "\n");
+
+         if (libretro_runloop_active)
+            changed_prefs.chipset_mask =
+                 !strcmp(var.value, "ecs_agnus")  ? CSMASK_ECS_AGNUS
+               : !strcmp(var.value, "ecs_denise") ? CSMASK_ECS_DENISE
+               : !strcmp(var.value, "ecs")        ? CSMASK_ECS_AGNUS | CSMASK_ECS_DENISE
+               : !strcmp(var.value, "aga")        ? CSMASK_AGA | CSMASK_ECS_AGNUS | CSMASK_ECS_DENISE
+               : 0;
+      }
+   }
+
+   GET_VAR("rtc")
+   {
+      extern int puae_rtc_override;
+      puae_rtc_override = -1;
+      if (strcmp(var.value, "auto"))
+      {
+         strcat(uae_config, "rtc=");
+         strcat(uae_config, var.value);
+         strcat(uae_config, "\n");
+
+         puae_rtc_override =
+                 !strcmp(var.value, "MSM6242B")       ? 1
+               : !strcmp(var.value, "RP5C01A")        ? 2
+               : !strcmp(var.value, "MSM6242B_A2000") ? 3
+               : 0;
+         if (libretro_runloop_active)
+            changed_prefs.cs_rtc = puae_rtc_override;
+      }
+   }
+
+   GET_VAR("cpuboard")
+   {
+      strlcpy(opt_cpuboard, var.value, sizeof(opt_cpuboard));
+   }
+
+   GET_VAR("cpuboard_mem")
+   {
+      opt_cpuboard_mem = strcmp(var.value, "auto") ? atoi(var.value) : -1;
+   }
+
+   GET_VAR("cpu_data_cache")
+   {
+      strcat(uae_config, strcmp(var.value, "enabled") ? "cpu_data_cache=false\n" : "cpu_data_cache=true\n");
+   }
+
+   GET_VAR("harddrive_write_protect")
+   {
+      strcat(uae_config, strcmp(var.value, "enabled") ? "harddrive_write_protect=false\n" : "harddrive_write_protect=true\n");
+   }
+
+   GET_VAR("keyboard_type")
+   {
+      /* Applied with the model configuration, see retro_config_keyboard() */
+      strlcpy(opt_keyboard_type, var.value, sizeof(opt_keyboard_type));
+   }
+
+   GET_VAR("display_optimizations")
+   {
+      strcat(uae_config, "display_optimizations=");
+      strcat(uae_config, var.value);
+      strcat(uae_config, "\n");
+
+      if (libretro_runloop_active)
+      {
+         if      (!strcmp(var.value, "full"))    changed_prefs.cs_optimizations = DISPLAY_OPTIMIZATIONS_FULL;
+         else if (!strcmp(var.value, "partial")) changed_prefs.cs_optimizations = DISPLAY_OPTIMIZATIONS_PARTIAL;
+         else if (!strcmp(var.value, "none"))    changed_prefs.cs_optimizations = DISPLAY_OPTIMIZATIONS_NONE;
+      }
+   }
+
    GET_VAR("gfx_framerate")
    {
       int val = 0;
@@ -4341,6 +4820,38 @@ static void update_variables(void)
          if   (!strcmp(var.value, "disabled")) changed_prefs.gfx_gamma = 0;
          else                                  changed_prefs.gfx_gamma = val;
       }
+   }
+
+   GET_VAR("gfx_lores_filtered")
+   {
+      int val = !strcmp(var.value, "enabled");
+      strcat(uae_config, val ? "gfx_lores_mode=filtered\n" : "gfx_lores_mode=normal\n");
+
+      if (libretro_runloop_active)
+         changed_prefs.gfx_lores_mode = val;
+   }
+
+   GET_VAR("video_interlace_mode")
+   {
+      extern int puae_iscanlines;
+      if      (!strcmp(var.value, "frames"))      puae_iscanlines = 0;
+      else if (!strcmp(var.value, "fields_plus")) puae_iscanlines = 2;
+      else                                        puae_iscanlines = 1;
+
+      if (libretro_runloop_active)
+         changed_prefs.gfx_iscanlines = puae_iscanlines;
+   }
+
+   GET_VAR("video_progressive_mode")
+   {
+      extern int puae_pscanlines;
+      if      (!strcmp(var.value, "scanlines"))   puae_pscanlines = 1;
+      else if (!strcmp(var.value, "fields"))      puae_pscanlines = 2;
+      else if (!strcmp(var.value, "fields_plus")) puae_pscanlines = 3;
+      else                                        puae_pscanlines = 0;
+
+      if (libretro_runloop_active)
+         changed_prefs.gfx_pscanlines = puae_pscanlines;
    }
 
    GET_VAR("gfx_flickerfixer")
@@ -4407,7 +4918,7 @@ static void update_variables(void)
       else
       {
          int new_vertical_offset = atoi(var.value);
-         if (new_vertical_offset >= -minfirstline && new_vertical_offset <= 70)
+         if (new_vertical_offset >= -retro_minfirstline && new_vertical_offset <= 70)
             opt_vertical_offset = new_vertical_offset;
       }
    }
@@ -4783,6 +5294,9 @@ static void update_variables(void)
    {
       mapper_keys[RETRO_MAPPER_SAVE_DISK] = retro_keymap_id(var.value);
    }
+
+   /* Accelerator board, last: it sets the CPU */
+   retro_config_cpuboard();
 
    /* Setting resolution */
    switch (video_config)
@@ -5614,6 +6128,102 @@ static void retro_config_boot_hd(void)
    tmp_str = NULL;
 }
 
+/* ROM scanner: like WinUAE's ROM scan, every file of the system directory
+ * and of system/uae (plus its subfolders) that the WinUAE ROM database knows
+ * is added to the ROM list, so ROMs are found by contents whatever their file
+ * name: Kickstarts (see uae_kickstarts[].romids), extended ROMs, accelerator
+ * and expansion board ROMs. Done once per session. */
+static void retro_scan_roms_dir(const char *dirpath, int depth)
+{
+   RDIR *dir;
+
+   if (!path_is_directory(dirpath) || !(dir = retro_opendir(dirpath)))
+      return;
+   while (retro_readdir(dir))
+   {
+      char path[RETRO_PATH_MAX];
+      const char *name = retro_dirent_get_name(dir);
+      uint64_t size;
+      uae_u8 *buf;
+      FILE *fp;
+
+      if (!name || name[0] == '.')
+         continue;
+      path_join(path, dirpath, name);
+      if (path_is_directory(path))
+      {
+         if (depth > 0)
+            retro_scan_roms_dir(path, depth - 1);
+         continue;
+      }
+      /* 2KB keyboard ROMs up to 1MB CD32 ROMs, AMIROMTYPE1 header included */
+      size = fsize(path);
+      if (size < 2048 || size > 1048576 + 11)
+         continue;
+      if (!(buf = (uae_u8*)malloc((size_t)size)))
+         continue;
+      if ((fp = fopen(path, "rb")))
+      {
+         if (fread(buf, 1, (size_t)size, fp) == (size_t)size)
+         {
+            struct romdata *rd = getromdatabydata(buf, (int)size);
+            /* Split ROMs (_even/_odd halves) need both files: not supported */
+            if (rd && !(rd->type & (ROMTYPE_EVEN | ROMTYPE_ODD)))
+               romlist_add(path, rd);
+         }
+         fclose(fp);
+      }
+      free(buf);
+   }
+   retro_closedir(dir);
+}
+
+static void retro_scan_roms(void)
+{
+   static bool scanned = false;
+   char uae_dir[RETRO_PATH_MAX];
+
+   if (scanned || string_is_empty(retro_system_directory))
+      return;
+   scanned = true;
+   path_join(uae_dir, retro_system_directory, "uae");
+   retro_scan_roms_dir(retro_system_directory, 0);
+   retro_scan_roms_dir(uae_dir, 1);
+   log_cb(RETRO_LOG_INFO, "ROM scan: %d known ROM(s) found.\n", romlist_count());
+}
+
+/* Kickstart table entry of a file name, or -1 */
+static int retro_kickstart_index(const char *name)
+{
+   unsigned i;
+   for (i = 0; i < sizeof(uae_kickstarts) / sizeof(uae_kickstarts[0]); i++)
+      if (uae_kickstarts[i].normal && !strcmp(uae_kickstarts[i].normal, name))
+         return (int)i;
+   return -1;
+}
+
+/* Kickstart found by contents: the first of romids[] present in the ROM list */
+static bool retro_kickstart_by_id(const char *name, char *out, size_t out_size)
+{
+   int i = retro_kickstart_index(name), j, ids[2];
+
+   if (i < 0)
+      return false;
+   retro_scan_roms();
+   for (j = 0; j < 4 && uae_kickstarts[i].romids[j] > 0; j++)
+   {
+      struct romlist *rl;
+      ids[0] = uae_kickstarts[i].romids[j];
+      ids[1] = -1;
+      if ((rl = getromlistbyids(ids, NULL)) && path_is_valid(rl->path))
+      {
+         strlcpy(out, rl->path, out_size);
+         return true;
+      }
+   }
+   return false;
+}
+
 static void retro_config_kickstart(void)
 {
    char kickstart[RETRO_PATH_MAX];
@@ -5648,16 +6258,14 @@ static void retro_config_kickstart(void)
    if (!valid)
    {
       /* Search for Amiga Forever + TOSEC naming conventions */
-      unsigned i = 0;
-      for (i = 0; i < sizeof(uae_kickstarts); i++)
-      {
-         if (!strcmp(uae_kickstarts[i].normal, uae_kickstart))
-            break;
-      }
+      int i = retro_kickstart_index(uae_kickstart);
 
-      path_join(kickstart, retro_system_directory, uae_kickstarts[i].aforever);
-      valid = path_is_valid(kickstart);
-      if (!valid)
+      if (i >= 0 && !string_is_empty(uae_kickstarts[i].aforever))
+      {
+         path_join(kickstart, retro_system_directory, uae_kickstarts[i].aforever);
+         valid = path_is_valid(kickstart);
+      }
+      if (!valid && i >= 0)
       {
          if (!string_is_empty(uae_kickstarts[i].tosec_mod))
          {
@@ -5674,6 +6282,10 @@ static void retro_config_kickstart(void)
          }
       }
    }
+
+   /* Search by contents (any file name) */
+   if (!valid && strcmp(opt_kickstart, "aros"))
+      valid = retro_kickstart_by_id(uae_kickstart, kickstart, sizeof(kickstart));
 
    /* Fallback to original filename */
    if (!valid)
@@ -5713,16 +6325,14 @@ static void retro_config_kickstart(void)
          if (!valid)
          {
             /* Search for Amiga Forever + TOSEC naming conventions */
-            unsigned i = 0;
-            for (i = 0; i < sizeof(uae_kickstarts); i++)
-            {
-               if (!strcmp(uae_kickstarts[i].normal, uae_kickstart_ext))
-                  break;
-            }
+            int i = retro_kickstart_index(uae_kickstart_ext);
 
-            path_join(kickstart_ext, retro_system_directory, uae_kickstarts[i].aforever);
-            valid = path_is_valid(kickstart_ext);
-            if (!valid)
+            if (i >= 0 && !string_is_empty(uae_kickstarts[i].aforever))
+            {
+               path_join(kickstart_ext, retro_system_directory, uae_kickstarts[i].aforever);
+               valid = path_is_valid(kickstart_ext);
+            }
+            if (!valid && i >= 0)
             {
                if (!string_is_empty(uae_kickstarts[i].tosec_mod))
                {
@@ -5739,6 +6349,10 @@ static void retro_config_kickstart(void)
                }
             }
          }
+
+         /* Search by contents (any file name) */
+         if (!valid)
+            valid = retro_kickstart_by_id(uae_kickstart_ext, kickstart_ext, sizeof(kickstart_ext));
 
          /* Fallback to original filename */
          if (!valid)
@@ -5765,8 +6379,8 @@ static void retro_config_kickstart(void)
       if (opt_shared_nvram || string_is_empty(full_path))
       {
          snprintf(flash_filename, sizeof(flash_filename), "%s.nvr", LIBRETRO_PUAE_PREFIX);
-         /* CDTV suffix */
-         if (ks_size == ROM_SIZE_256)
+         /* CDTV suffix (CDTV-CR has a 512K Kickstart) */
+         if (ks_size == ROM_SIZE_256 || strstr(uae_preset, "CDTV"))
             snprintf(flash_filename, sizeof(flash_filename), "%s_cdtv.nvr", LIBRETRO_PUAE_PREFIX);
       }
       /* Per game */
@@ -5780,6 +6394,361 @@ static void retro_config_kickstart(void)
       path_join(flash_filepath, retro_save_directory, flash_filename);
       log_cb(RETRO_LOG_INFO, "NVRAM: \"%s\".\n", flash_filepath);
       retro_config_append("flash_file=%s\n", flash_filepath);
+   }
+
+   /* Boards whose boot ROM works only with some Kickstarts (tested with
+    * xsysinfo): E-Matrix 530 and Typhoon MK2 reset in a loop with 1.x.
+    * Not offered: Fusion Forty and Harms 3000 (black screen with 3.x,
+    * spontaneous resets with 1.3), T-Rex II and Twelve Gauge (CPU halt). */
+   {
+      static const struct { const char *board; int ksmin, ksmax; const char *hint; } ksreq[] = {
+         { "e-matrix530", 2, 99, "Kickstart 2.0+ (A500+ model)" },
+         { "typhoon2",    2, 99, "Kickstart 2.0+ (A500+ model)" },
+      };
+      unsigned k;
+      for (k = 0; k < sizeof(ksreq) / sizeof(ksreq[0]); k++)
+      {
+         struct romdata *rd;
+         int ver;
+         if (strcmp(opt_cpuboard, ksreq[k].board) || !path_is_valid(uae_kickstart))
+            continue;
+         retro_scan_roms();
+         rd = getromdatabypath(uae_kickstart);
+         ver = (rd && rd->ver > 0) ? rd->ver : (fsize(uae_kickstart) <= ROM_SIZE_256 ? 1 : 3);
+         if (ver < ksreq[k].ksmin || ver > ksreq[k].ksmax)
+         {
+            log_cb(RETRO_LOG_WARN, "Accelerator board \"%s\" needs %s.\n", opt_cpuboard, ksreq[k].hint);
+            snprintf(retro_message_msg, sizeof(retro_message_msg),
+                  "This accelerator needs %s", ksreq[k].hint);
+            retro_message = true;
+         }
+      }
+   }
+
+   retro_config_keyboard();
+}
+
+/* Keyboard microcontroller emulation (WinUAE 6 "keyboard_type").
+ * The MCU types need the dump of their ROM, which libretro has no ROM scanner
+ * for: look for it by size and CRC32 in the system directory. */
+extern uae_u32 get_crc32(void *p, int size);
+
+static bool retro_find_kbmcu_rom(uae_u32 crc, uae_u32 crc_alt, int size, char *out, size_t out_size)
+{
+   const char *dirs[2];
+   unsigned d;
+   char uae_dir[RETRO_PATH_MAX];
+
+   path_join(uae_dir, retro_system_directory, "uae");
+   dirs[0] = retro_system_directory;
+   dirs[1] = uae_dir;
+
+   for (d = 0; d < 2; d++)
+   {
+      RDIR *dir;
+
+
+      if (!path_is_directory(dirs[d]))
+         continue;
+      dir = retro_opendir(dirs[d]);
+      if (!dir)
+         continue;
+      while (retro_readdir(dir))
+      {
+         char path[RETRO_PATH_MAX];
+         uae_u8 *buf;
+         FILE *f;
+         bool match = false;
+
+         path_join(path, dirs[d], retro_dirent_get_name(dir));
+         if (path_is_directory(path) || fsize(path) != (uint64_t)size)
+            continue;
+         if (!(buf = (uae_u8*)malloc(size)))
+            continue;
+         if ((f = fopen(path, "rb")))
+         {
+            if (fread(buf, 1, size, f) == (size_t)size)
+            {
+               uae_u32 c = get_crc32(buf, size);
+               match = c == crc || (crc_alt && c == crc_alt);
+            }
+            fclose(f);
+         }
+         free(buf);
+         if (match)
+         {
+            strlcpy(out, path, out_size);
+            retro_closedir(dir);
+            return true;
+         }
+      }
+      retro_closedir(dir);
+   }
+   return false;
+}
+
+static void retro_config_keyboard(void)
+{
+   static const struct
+   {
+      const char *type;
+      uae_u32 crc;
+      uae_u32 crc_alt; /* other known good dump, or 0 */
+      int size;
+      const char *mcu;
+   } kbmcu[] = {
+      { "a500_6570-036",  0x4a3fc332, 0, 2048, "6570-036" },
+      { "a600_6570-036",  0x4a3fc332, 0, 2048, "6570-036" },
+      { "a1000_6570-036", 0x4a3fc332, 0, 2048, "6570-036" },
+      { "ax000_6570-036", 0x4a3fc332, 0, 2048, "6570-036" },
+      { "a1200_6805",     0x2a77eec4, 0, 8192, "68HC05" },
+      /* fb92a773: another D8039HLC dump, works in WinUAE when selected by path */
+      { "a2000_8039",     0xc23d280e, 0xfb92a773, 2048, "D8039HLC" },
+   };
+   const char *type = opt_keyboard_type;
+   char rom[RETRO_PATH_MAX];
+   unsigned i;
+
+   if (!strcmp(type, "auto"))
+   {
+      /* CD32 and CDTV keep the default: their keyboards are optional */
+      if (strstr(uae_preset, "CD"))
+         type = "uae";
+      else if (strstr(uae_preset, "A1200"))
+         type = "a1200_6805";
+      else if (strstr(uae_preset, "A600"))
+         type = "a600_6570-036";
+      else if (strstr(uae_preset, "A2000"))
+         type = "a2000_8039";
+      else if (strstr(uae_preset, "A40") || strstr(uae_preset, "A30"))
+         type = "ax000_6570-036";
+      else
+         type = "a500_6570-036";
+   }
+
+   for (i = 0; i < sizeof(kbmcu) / sizeof(kbmcu[0]); i++)
+      if (!strcmp(type, kbmcu[i].type))
+         break;
+   if (i == sizeof(kbmcu) / sizeof(kbmcu[0]))
+      return; /* "uae": the default of the emulation */
+
+   if (!retro_find_kbmcu_rom(kbmcu[i].crc, kbmcu[i].crc_alt, kbmcu[i].size, rom, sizeof(rom)))
+   {
+      log_cb(RETRO_LOG_WARN, "Keyboard MCU ROM %s (CRC32 %08x) not found, using UAE keyboard.\n",
+            kbmcu[i].mcu, kbmcu[i].crc);
+      snprintf(retro_message_msg, sizeof(retro_message_msg),
+            "Keyboard MCU ROM %s not found, using UAE keyboard", kbmcu[i].mcu);
+      retro_message = true;
+      return;
+   }
+
+   log_cb(RETRO_LOG_INFO, "Keyboard: %s, MCU ROM \"%s\".\n", type, path_basename(rom));
+   retro_config_append("keyboard_type=%s\n", type);
+   retro_config_append("keyboard_rom_file=%s\n", rom);
+}
+
+/* Accelerator boards (WinUAE "cpuboard_type"). The board ROM is looked up by
+ * its contents (CRC32 or SHA1 of the WinUAE ROM database), in the system
+ * directory and system/uae, since libretro has no ROM scanner. */
+static bool retro_find_board_rom(uae_u32 romtype, char *out, size_t out_size)
+{
+   const char *dirs[2];
+   unsigned d;
+   char uae_dir[RETRO_PATH_MAX];
+
+   /* Scanned ROM list (system dir, system/uae and its subfolders): highest
+    * version first, then the order of the WinUAE database, which lists the
+    * newest revision first when there is no version (A2620/A2630 -07 before
+    * -01, the early revisions being A2620 + Kickstart 1.3 only) */
+   {
+      struct romlist *rl;
+      struct romdata *best = NULL;
+      int n, k, b = -1;
+
+      retro_scan_roms();
+      rl = romlist_getit();
+      n = romlist_count();
+      for (k = 0; k < n; k++)
+      {
+         struct romdata *rd = rl[k].rd, *db = getromdatabyid(rd->id);
+         if ((rd->type & ROMTYPE_MASK) != (romtype & ROMTYPE_MASK) || !path_is_valid(rl[k].path))
+            continue;
+         if (!db)
+            db = rd;
+         if (!best
+               || db->ver > best->ver
+               || (db->ver == best->ver && db->rev > best->rev)
+               || (db->ver == best->ver && db->rev == best->rev && db < best))
+         {
+            best = db;
+            b = k;
+         }
+      }
+      if (b >= 0)
+      {
+         strlcpy(out, rl[b].path, out_size);
+         return true;
+      }
+   }
+
+   path_join(uae_dir, retro_system_directory, "uae");
+   dirs[0] = retro_system_directory;
+   dirs[1] = uae_dir;
+
+   for (d = 0; d < 2; d++)
+   {
+      RDIR *dir;
+
+
+      if (!path_is_directory(dirs[d]) || !(dir = retro_opendir(dirs[d])))
+         continue;
+      while (retro_readdir(dir))
+      {
+         char path[RETRO_PATH_MAX];
+         uint64_t size;
+         uae_u8 *buf;
+         FILE *f;
+         bool match = false;
+
+         path_join(path, dirs[d], retro_dirent_get_name(dir));
+         if (path_is_directory(path))
+            continue;
+         /* Board ROMs are 8KB to 512KB */
+         size = fsize(path);
+         if (size < 8192 || size > 524288 || (size & (size - 1)))
+            continue;
+         if (!(buf = (uae_u8*)malloc((size_t)size)))
+            continue;
+         if ((f = fopen(path, "rb")))
+         {
+            if (fread(buf, 1, (size_t)size, f) == (size_t)size)
+            {
+               struct romdata *rd = getromdatabydata(buf, (int)size);
+               match = rd && (rd->type & ROMTYPE_MASK) == (romtype & ROMTYPE_MASK);
+            }
+            fclose(f);
+         }
+         free(buf);
+         if (match)
+         {
+            strlcpy(out, path, out_size);
+            retro_closedir(dir);
+            return true;
+         }
+      }
+      retro_closedir(dir);
+   }
+
+   /* ROMs without checksums in the database (flash images such as the
+    * CyberStorm MK II) are known only by their default file name */
+   {
+      int id;
+      for (id = 1; id < 1000; id++)
+      {
+         struct romdata *rd = getromdatabyid(id);
+         if (!rd || !rd->defaultfilename || rd->crc32
+               || (rd->type & ROMTYPE_MASK) != (romtype & ROMTYPE_MASK))
+            continue;
+         for (d = 0; d < 2; d++)
+         {
+            char path[RETRO_PATH_MAX];
+            path_join(path, dirs[d], rd->defaultfilename);
+            if (path_is_valid(path) && fsize(path) == rd->size)
+            {
+               strlcpy(out, path, out_size);
+               return true;
+            }
+         }
+      }
+   }
+   return false;
+}
+
+static void retro_config_cpuboard(void)
+{
+   const struct cpuboardsubtype *cbst = NULL;
+   char rom[RETRO_PATH_MAX] = {0};
+   char row[RETRO_PATH_MAX + 64];
+   int cpu, mem, ctype;
+   unsigned i, j;
+
+   extern int puae_cpuboard_cpu;
+   puae_cpuboard_cpu = 0;
+   if (!strcmp(opt_cpuboard, "none"))
+      return;
+
+   for (i = 0; cpuboards[i].name && !cbst; i++)
+      for (j = 0; cpuboards[i].subtypes && cpuboards[i].subtypes[j].name; j++)
+         if (!strcmp(cpuboards[i].subtypes[j].configname, opt_cpuboard))
+         {
+            cbst = &cpuboards[i].subtypes[j];
+            break;
+         }
+   if (!cbst)
+   {
+      log_cb(RETRO_LOG_WARN, "Accelerator board \"%s\" is not available in this build.\n", opt_cpuboard);
+      return;
+   }
+
+   /* Boot ROM: mandatory unless the board works without one */
+   if (cbst->romtype && !retro_find_board_rom(cbst->romtype, rom, sizeof(rom)))
+   {
+      if (!(cbst->romtype & ROMTYPE_NONE))
+      {
+         log_cb(RETRO_LOG_WARN, "Accelerator board \"%s\": ROM not found, board disabled.\n", cbst->name);
+         snprintf(retro_message_msg, sizeof(retro_message_msg),
+               "%s ROM not found, accelerator disabled", cbst->name);
+         retro_message = true;
+         return;
+      }
+   }
+
+   /* Memory: 32MB or the board maximum when not set, clamped to the maximum */
+   mem = opt_cpuboard_mem < 0 ? 32 : opt_cpuboard_mem;
+   if (mem * 1024 * 1024 > cbst->maxmemory)
+      mem = cbst->maxmemory / (1024 * 1024);
+
+   /* CPU of the board, or the 'CPU Model' option when the board takes it
+    * (68040/68060 boards: either; 68020/68030 boards: at least the board CPU) */
+   /* Hardital TQM: a 68030 board that WinUAE leaves on the machine CPU */
+   ctype = cbst->cputype;
+   if (!ctype && !strcmp(cbst->configname, "tqm"))
+      ctype = 3;
+   cpu = 68000 + ctype * 10;
+   if (ctype >= 4 && (override_opt.cpu_model == 68040 || override_opt.cpu_model == 68060))
+      cpu = override_opt.cpu_model;
+   else if (ctype >= 2 && ctype < 4 && override_opt.cpu_model >= cpu && override_opt.cpu_model <= 68030)
+      cpu = override_opt.cpu_model;
+   /* CyberStorm MK I: its only ROM is the 68060 support ROM (with a 68040 the
+    * board runs without ROM, and a 68040 hangs on the 68060 ROM) */
+   if ((cbst->romtype & ROMTYPE_MASK) == (ROMTYPE_CB_CSMK1 & ROMTYPE_MASK))
+   {
+      if (override_opt.cpu_model == 68040)
+         rom[0] = 0;
+      else if (rom[0])
+         cpu = 68060;
+   }
+   puae_cpuboard_cpu = ctype >= 2 ? cpu : 0;
+
+   log_cb(RETRO_LOG_INFO, "Accelerator: %s, %dMB, CPU %d, ROM \"%s\".\n",
+         cbst->name, mem, cpu, rom[0] ? path_basename(rom) : "-");
+
+   snprintf(row, sizeof(row), "cpuboard_type=%s\ncpuboardmem1_size=%d\n", cbst->configname, mem);
+   strcat(uae_config, row);
+   if (rom[0])
+   {
+      snprintf(row, sizeof(row), "cpuboard_rom_file=%s\n", rom);
+      strcat(uae_config, row);
+   }
+   if (ctype >= 2)
+   {
+      snprintf(row, sizeof(row), "cpu_model=%d\ncpu_24bit_addressing=false\n", cpu);
+      strcat(uae_config, row);
+      if (cpu >= 68040)
+      {
+         snprintf(row, sizeof(row), "fpu_model=%d\n", cpu);
+         strcat(uae_config, row);
+      }
    }
 }
 
@@ -6059,6 +7028,11 @@ static char* emu_config_string(const char *mode, int config)
          case EMU_CONFIG_CDTV:      return "CDTV";
          case EMU_CONFIG_CD32:      return "CD32";
          case EMU_CONFIG_CD32FR:    return "CD32FR";
+         case EMU_CONFIG_A1000:     return "A1000";
+         case EMU_CONFIG_A3000:     return "A3000";
+         case EMU_CONFIG_A4060:     return "A4060";
+         case EMU_CONFIG_A4000T:    return "A4000T";
+         case EMU_CONFIG_CDTVCR:    return "CDTVCR";
       }
    }
    else if (!strcmp(mode, "kickstart"))
@@ -6080,6 +7054,11 @@ static char* emu_config_string(const char *mode, int config)
          case EMU_CONFIG_CDTV:      return uae_kickstarts[A500_KS13_ROM].normal;
          case EMU_CONFIG_CD32:      return uae_kickstarts[CD32_ROM].normal;
          case EMU_CONFIG_CD32FR:    return uae_kickstarts[CD32_ROM].normal;
+         case EMU_CONFIG_A1000:     return uae_kickstarts[A500_KS13_ROM].normal;
+         case EMU_CONFIG_A3000:     return uae_kickstarts[A3000_KS31_ROM].normal;
+         case EMU_CONFIG_A4060:     return uae_kickstarts[A4000_KS31_ROM].normal;
+         case EMU_CONFIG_A4000T:    return uae_kickstarts[A4000T_KS31_ROM].normal;
+         case EMU_CONFIG_CDTVCR:    return uae_kickstarts[A600_KS205_ROM].normal;
       }
    }
    else if (!strcmp(mode, "kickstart_ext"))
@@ -6089,6 +7068,7 @@ static char* emu_config_string(const char *mode, int config)
          case EMU_CONFIG_CDTV:      return uae_kickstarts[CDTV_ROM].normal;
          case EMU_CONFIG_CD32:      return uae_kickstarts[CD32_ROM_EXT].normal;
          case EMU_CONFIG_CD32FR:    return uae_kickstarts[CD32_ROM_EXT].normal;
+         case EMU_CONFIG_CDTVCR:    return uae_kickstarts[CDTVCR_ROM_EXT].normal;
          default:                   return "";
       }
    }
@@ -6112,6 +7092,11 @@ static int emu_config_int(const char *model)
    else if (!strcmp(model, "CDTV"))      return EMU_CONFIG_CDTV;
    else if (!strcmp(model, "CD32"))      return EMU_CONFIG_CD32;
    else if (!strcmp(model, "CD32FR"))    return EMU_CONFIG_CD32FR;
+   else if (!strcmp(model, "A1000"))     return EMU_CONFIG_A1000;
+   else if (!strcmp(model, "A3000"))     return EMU_CONFIG_A3000;
+   else if (!strcmp(model, "A4060"))     return EMU_CONFIG_A4060;
+   else if (!strcmp(model, "A4000T"))    return EMU_CONFIG_A4000T;
+   else if (!strcmp(model, "CDTVCR"))    return EMU_CONFIG_CDTVCR;
    else return -1;
 }
 
@@ -6311,6 +7296,63 @@ static char* emu_config(int config)
          preset_opt.fastmem_size  = 8;
          preset_opt.chipset       = 4;
          preset_opt.cs_compatible = CP_CD32;
+
+         strcat(uae_preset_config,
+         "floppy0type=-1\n"
+         );
+         break;
+
+      /* Models of the WinUAE quickstart (cfgfile.c bip_*) */
+      case EMU_CONFIG_A1000:
+         preset_opt.chipmem_size  = 1;
+         preset_opt.bogomem_size  = 0;
+         preset_opt.fastmem_size  = 0;
+         preset_opt.chipset       = 5;
+         preset_opt.cs_compatible = CP_A1000;
+         break;
+
+      case EMU_CONFIG_A3000:
+         preset_opt.cpu_model     = 68030;
+         preset_opt.fpu_model     = 68882;
+         preset_opt.mmu_model     = 68030;
+         preset_opt.chipmem_size  = 4;
+         preset_opt.bogomem_size  = 0;
+         preset_opt.fastmem_size  = 8;
+         preset_opt.chipset       = 3;
+         preset_opt.cs_compatible = CP_A3000;
+         preset_opt.address_space_24 = 0;
+         break;
+
+      case EMU_CONFIG_A4060:
+         preset_opt.cpu_model     = 68060;
+         preset_opt.fpu_model     = 68060;
+         preset_opt.mmu_model     = 68060;
+         preset_opt.chipmem_size  = 4;
+         preset_opt.bogomem_size  = 0;
+         preset_opt.fastmem_size  = 8;
+         preset_opt.chipset       = 4;
+         preset_opt.cs_compatible = CP_A4000;
+         preset_opt.address_space_24 = 0;
+         break;
+
+      case EMU_CONFIG_A4000T:
+         preset_opt.cpu_model     = 68040;
+         preset_opt.fpu_model     = 68040;
+         preset_opt.mmu_model     = 68040;
+         preset_opt.chipmem_size  = 4;
+         preset_opt.bogomem_size  = 0;
+         preset_opt.fastmem_size  = 8;
+         preset_opt.chipset       = 4;
+         preset_opt.cs_compatible = CP_A4000T;
+         preset_opt.address_space_24 = 0;
+         break;
+
+      case EMU_CONFIG_CDTVCR:
+         preset_opt.chipmem_size  = 2;
+         preset_opt.bogomem_size  = 0;
+         preset_opt.fastmem_size  = 0;
+         preset_opt.chipset       = 3;
+         preset_opt.cs_compatible = CP_CDTVCR;
 
          strcat(uae_preset_config,
          "floppy0type=-1\n"
@@ -6544,7 +7586,27 @@ static bool retro_create_config(void)
          /* Check if model is specified in the path on 'Automatic' */
          if (!strcmp(opt_model, "auto"))
          {
-            if (strstr(full_path, "(A4030)") || strstr(full_path, "(030)"))
+            if (strstr(full_path, "(A4060)") || strstr(full_path, "(060)"))
+            {
+               log_cb(RETRO_LOG_INFO, "Found \"(A4060)\" or \"(060)\" in: \"%s\".\n", full_path);
+               retro_config_preset("A4060");
+            }
+            else if (strstr(full_path, "(A4000T)"))
+            {
+               log_cb(RETRO_LOG_INFO, "Found \"(A4000T)\" in: \"%s\".\n", full_path);
+               retro_config_preset("A4000T");
+            }
+            else if (strstr(full_path, "(A3000)"))
+            {
+               log_cb(RETRO_LOG_INFO, "Found \"(A3000)\" in: \"%s\".\n", full_path);
+               retro_config_preset("A3000");
+            }
+            else if (strstr(full_path, "(A1000)"))
+            {
+               log_cb(RETRO_LOG_INFO, "Found \"(A1000)\" in: \"%s\".\n", full_path);
+               retro_config_preset("A1000");
+            }
+            else if (strstr(full_path, "(A4030)") || strstr(full_path, "(030)"))
             {
                log_cb(RETRO_LOG_INFO, "Found \"(A4030)\" or \"(030)\" in: \"%s\".\n", full_path);
                retro_config_preset("A4030");
@@ -7087,6 +8149,11 @@ static bool retro_create_config(void)
                log_cb(RETRO_LOG_INFO, "Found \"(CD32)\" or \"(CD32NF)\" in: \"%s\".\n", full_path);
                retro_config_preset("CD32");
             }
+            else if (strstr(full_path, "CDTV-CR") || strstr(full_path, "CDTVCR"))
+            {
+               log_cb(RETRO_LOG_INFO, "Found \"CDTV-CR\" in: \"%s\".\n", full_path);
+               retro_config_preset("CDTVCR");
+            }
             else if (strstr(full_path, "CDTV"))
             {
                log_cb(RETRO_LOG_INFO, "Found \"CDTV\" in: \"%s\".\n", full_path);
@@ -7270,7 +8337,7 @@ static bool retro_create_config(void)
 
       /* Bootable HD exception, not for CD systems */
       if (opt_use_boot_hd)
-         if (strcmp(opt_model, "CD32") && strcmp(opt_model, "CD32FR") && strcmp(opt_model, "CDTV"))
+         if (strcmp(opt_model, "CD32") && strcmp(opt_model, "CD32FR") && strcmp(opt_model, "CDTV") && strcmp(opt_model, "CDTVCR"))
             retro_config_boot_hd();
 
       /* Write common config */
@@ -7396,6 +8463,24 @@ static void retro_reset_hard(void)
    fake_ntsc = false;
    locked_video_horizontal = false;
 
+   /* Restart the automatic centering/crop detection as on a fresh start:
+    * the history of the previous machine shifted the picture of the new
+    * one (A500 -> CDTV started 25 lines too high) */
+   retro_thisframe_counter                = 0;
+   retro_thisframe_first_drawn_line_old   = -1;
+   retro_thisframe_first_drawn_line_start = -1;
+   retro_thisframe_last_drawn_line_old    = -1;
+   retro_thisframe_last_drawn_line_start  = -1;
+   retro_thisframe_y_adjust_old           = -1;
+   retro_min_diwstart_old                 = -1;
+   retro_max_diwstop_old                  = -1;
+   retro_diwstartstop_counter             = 0;
+   retro_visible_left_border_old          = 0;
+   retro_thisframe_first_drawn_line       = -1;
+   retro_thisframe_last_drawn_line        = -1;
+   retro_min_diwstart                     = 30000; /* RETRO_TOTAL_NONE */
+   retro_thisframe_y_adjust               = 0;
+
    /* Preset override circle:
     * - config preset models require core options
     * - core option overrides require config presets */
@@ -7403,11 +8488,14 @@ static void retro_reset_hard(void)
    retro_create_config();
    update_variables();
 
-   target_cfgfile_load(&currprefs, "", 0, 0);
-   if (inputdevice_finalized)
-      inputdevice_updateconfig(NULL, &currprefs);
-
-   uae_reset(1, 0); /* hardreset, keyboardreset */
+   /* Restart the emulation from scratch with the new configuration, as
+    * loading the core does (uae_restart -> libretro_do_restart ->
+    * real_main2). A hard reset applies a changed configuration only
+    * piece by piece: memory_reset() copied the ROM and RAM sizes back from
+    * changed_prefs (A500 -> A1200 ran with Kickstart 1.3), and chipset
+    * changes arrived only after custom_reset() had run with the old
+    * chipset (A1200 -> A500 started as NTSC). */
+   uae_restart(&currprefs, 0, NULL);
 }
 
 static void retro_reset_soft(void)
@@ -7421,78 +8509,78 @@ static void retro_reset_soft(void)
 static void update_video_center_vertical(void)
 {
    int retroh_crop_normal     = (video_config & PUAE_VIDEO_DOUBLELINE) && !retro_doublescan ? retroh_crop / 2 : retroh_crop;
-   int thisframe_y_adjust_new = thisframe_y_adjust_old;
-   int thisframe_y_adjust_cur = thisframe_y_adjust;
+   int retro_thisframe_y_adjust_new = retro_thisframe_y_adjust_old;
+   int retro_thisframe_y_adjust_cur = retro_thisframe_y_adjust;
    int first_drawn_limit      = 150;
    int last_drawn_limit       = 150;
 
    /* Reset default top border except with doublescan use first drawn line */
-   thisframe_y_adjust = (video_productivity) ? retro_thisframe_first_drawn_line : minfirstline;
+   retro_thisframe_y_adjust = (video_productivity) ? retro_thisframe_first_drawn_line : retro_minfirstline;
 
    /* Need proper values for calculations */
    if (!opt_vertical_offset_auto)
-      thisframe_y_adjust_new = thisframe_y_adjust + opt_vertical_offset;
+      retro_thisframe_y_adjust_new = retro_thisframe_y_adjust + opt_vertical_offset;
    else if ( retro_thisframe_first_drawn_line       != retro_thisframe_last_drawn_line
          && (retro_thisframe_first_drawn_line > 0   && retro_thisframe_last_drawn_line > 0)
          && (retro_thisframe_first_drawn_line < first_drawn_limit || retro_thisframe_last_drawn_line > last_drawn_limit)
       )
-      thisframe_y_adjust_new = (retro_thisframe_last_drawn_line - retro_thisframe_first_drawn_line - retroh_crop_normal) / 2 + retro_thisframe_first_drawn_line;
-   else if (retro_thisframe_first_drawn_line == -1 && retro_thisframe_last_drawn_line == -1 && thisframe_y_adjust_old != 0)
-      thisframe_y_adjust_new = thisframe_y_adjust_old;
+      retro_thisframe_y_adjust_new = (retro_thisframe_last_drawn_line - retro_thisframe_first_drawn_line - retroh_crop_normal) / 2 + retro_thisframe_first_drawn_line;
+   else if (retro_thisframe_first_drawn_line == -1 && retro_thisframe_last_drawn_line == -1 && retro_thisframe_y_adjust_old != 0)
+      retro_thisframe_y_adjust_new = retro_thisframe_y_adjust_old;
 
    /* Sensible limits */
-   thisframe_y_adjust_new = (thisframe_y_adjust_new < 0) ? 0 : thisframe_y_adjust_new;
-   thisframe_y_adjust_new = (thisframe_y_adjust_new > (minfirstline + 70)) ? (minfirstline + 70) : thisframe_y_adjust_new;
+   retro_thisframe_y_adjust_new = (retro_thisframe_y_adjust_new < 0) ? 0 : retro_thisframe_y_adjust_new;
+   retro_thisframe_y_adjust_new = (retro_thisframe_y_adjust_new > (retro_minfirstline + 70)) ? (retro_minfirstline + 70) : retro_thisframe_y_adjust_new;
 
    /* Remember the previous value */
-   thisframe_y_adjust_old = thisframe_y_adjust_new;
+   retro_thisframe_y_adjust_old = retro_thisframe_y_adjust_new;
 
    /* Corrections if top border has stuff in it.
     * Allow centering of all cropped sizes and also
     * prevent centering in Agony intro.. */
    if (     opt_vertical_offset_auto
-         && thisframe_y_adjust_new < thisframe_y_adjust && thisframe_y_adjust_new > 0)
+         && retro_thisframe_y_adjust_new < retro_thisframe_y_adjust && retro_thisframe_y_adjust_new > 0)
    {
-      int diff = thisframe_y_adjust - thisframe_y_adjust_new;
+      int diff = retro_thisframe_y_adjust - retro_thisframe_y_adjust_new;
       if (     retro_thisframe_last_drawn_line - retro_thisframe_first_drawn_line < first_drawn_limit
             || !opt_vertical_offset)
          diff = 0;
 
-      thisframe_y_adjust     -= diff;
-      thisframe_y_adjust_new -= diff;
+      retro_thisframe_y_adjust     -= diff;
+      retro_thisframe_y_adjust_new -= diff;
    }
    else if (opt_vertical_offset_auto
-         && thisframe_y_adjust_new > thisframe_y_adjust
+         && retro_thisframe_y_adjust_new > retro_thisframe_y_adjust
          && retro_thisframe_first_drawn_line > retroh_crop_normal / 2
          && retroh_crop_normal > EMULATOR_MIN_HEIGHT)
-      thisframe_y_adjust_new = retro_thisframe_last_drawn_line - retroh_crop_normal + thisframe_y_adjust;
+      retro_thisframe_y_adjust_new = retro_thisframe_last_drawn_line - retroh_crop_normal + retro_thisframe_y_adjust;
 
    /* Disallow centering if trying to crop NTSC aspect in full PAL mode */
    if (retroh == retroh_crop && !video_productivity)
-      thisframe_y_adjust = thisframe_y_adjust_new = minfirstline;
+      retro_thisframe_y_adjust = retro_thisframe_y_adjust_new = retro_minfirstline;
 
    /* Manual offset override */
    if (!opt_vertical_offset_auto)
    {
-      thisframe_y_adjust += opt_vertical_offset;
-      if (thisframe_y_adjust < minfirstline)
-         thisframe_y_adjust_new += thisframe_y_adjust - minfirstline;
+      retro_thisframe_y_adjust += opt_vertical_offset;
+      if (retro_thisframe_y_adjust < retro_minfirstline)
+         retro_thisframe_y_adjust_new += retro_thisframe_y_adjust - retro_minfirstline;
    }
 
    /* Offset adjustments */
-   thisframe_y_adjust_new -= thisframe_y_adjust;
-   thisframe_y_adjust_new = (thisframe_y_adjust_new < 0) ? 0 : thisframe_y_adjust_new;
+   retro_thisframe_y_adjust_new -= retro_thisframe_y_adjust;
+   retro_thisframe_y_adjust_new = (retro_thisframe_y_adjust_new < 0) ? 0 : retro_thisframe_y_adjust_new;
 
    /* Change value always due to the possible change of interlace */
-   retroy_crop = thisframe_y_adjust_new * ((video_config & PUAE_VIDEO_DOUBLELINE) && !retro_doublescan ? 2 : 1);
+   retroy_crop = retro_thisframe_y_adjust_new * ((video_config & PUAE_VIDEO_DOUBLELINE) && !retro_doublescan ? 2 : 1);
 
 #if 0
-   printf("FIRSTDRAWN:%6d LASTDRAWN:%6d   yadjust:%3d old:%3d cur:%3d croph:%d cropy:%d\n", retro_thisframe_first_drawn_line, retro_thisframe_last_drawn_line, thisframe_y_adjust, thisframe_y_adjust_old, thisframe_y_adjust_cur, retroh_crop, retroy_crop);
+   printf("FIRSTDRAWN:%6d LASTDRAWN:%6d   yadjust:%3d old:%3d cur:%3d croph:%d cropy:%d\n", retro_thisframe_first_drawn_line, retro_thisframe_last_drawn_line, retro_thisframe_y_adjust, retro_thisframe_y_adjust_old, retro_thisframe_y_adjust_cur, retroh_crop, retroy_crop);
 #endif
 
-   /* Must reset drawing if internal border changes */
-   if (thisframe_y_adjust != thisframe_y_adjust_cur)
-      request_reset_drawing = true;
+   /* The top border is applied when the window is cut out of the raster
+    * (retro_video_blit), the emulation does not need to know about it */
+   (void)retro_thisframe_y_adjust_cur;
 
    /* Counter reset */
    retro_thisframe_counter = 0;
@@ -7502,77 +8590,77 @@ static void update_video_center_vertical(void)
 static void update_video_center_horizontal(void)
 {
    int default_left_border     = (retro_max_diwlastword - retrow);
-   int visible_left_border_new = retro_max_diwlastword - retrow + ((retrow - retrow_crop) / 2);
-   int visible_left_border_cur = visible_left_border;
+   int retro_visible_left_border_new = retro_max_diwlastword - retrow + ((retrow - retrow_crop) / 2);
+   int retro_visible_left_border_cur = retro_visible_left_border;
 
    /* Horizontal centering thresholds */
    int min_diwstart_limit = 162 * width_multiplier;
    int max_diwstop_limit  = 300 * width_multiplier;
 
    /* Always reset default left border */
-   visible_left_border = default_left_border;
+   retro_visible_left_border = default_left_border;
 
    /* Need proper values for calculations */
    if (locked_video_horizontal)
       ; /* no-op */
    else if (!opt_horizontal_offset_auto)
-      visible_left_border_new = visible_left_border + (opt_horizontal_offset * width_multiplier);
+      retro_visible_left_border_new = retro_visible_left_border + (opt_horizontal_offset * width_multiplier);
    else if (retro_min_diwstart != retro_max_diwstop
          && retro_min_diwstart > 0
          && retro_max_diwstop  > 0
          && retro_min_diwstart < min_diwstart_limit
          && retro_max_diwstop  > max_diwstop_limit
          && (retro_max_diwstop - retro_min_diwstart) <= (retrow + (4 * width_multiplier)))
-      visible_left_border_new = (retro_max_diwstop - retro_min_diwstart - retrow_crop) / 2 + retro_min_diwstart;
-   else if (retro_min_diwstart == MAX_STOP && retro_max_diwstop == 0 && visible_left_border != 0)
-      visible_left_border_new = visible_left_border;
+      retro_visible_left_border_new = (retro_max_diwstop - retro_min_diwstart - retrow_crop) / 2 + retro_min_diwstart;
+   else if (retro_min_diwstart == MAX_STOP && retro_max_diwstop == 0 && retro_visible_left_border != 0)
+      retro_visible_left_border_new = retro_visible_left_border;
 
    /* CD32 boot special */
    if (opt_horizontal_offset_auto && retro_max_diwstop < retro_min_diwstart)
-      visible_left_border_new = default_left_border;
+      retro_visible_left_border_new = default_left_border;
 
    /* Sensible limits */
-   visible_left_border_new = (visible_left_border_new < 0) ? 0 : visible_left_border_new;
-   visible_left_border_new = (visible_left_border_new / width_multiplier > 150) ? (150 * width_multiplier) : visible_left_border_new;
+   retro_visible_left_border_new = (retro_visible_left_border_new < 0) ? 0 : retro_visible_left_border_new;
+   retro_visible_left_border_new = (retro_visible_left_border_new / width_multiplier > 150) ? (150 * width_multiplier) : retro_visible_left_border_new;
 
    /* Remember the previous value */
-   visible_left_border_old = visible_left_border;
+   retro_visible_left_border_old = retro_visible_left_border;
 
    /* Essential correction if default left border has stuff left of it */
-   if (visible_left_border_new < visible_left_border)
+   if (retro_visible_left_border_new < retro_visible_left_border)
    {
-      int diff = visible_left_border - visible_left_border_new;
-      visible_left_border     -= diff;
-      visible_left_border_new -= diff;
+      int diff = retro_visible_left_border - retro_visible_left_border_new;
+      retro_visible_left_border     -= diff;
+      retro_visible_left_border_new -= diff;
    }
 
    /* Special Super72 modes */
    if (video_productivity && (retrow == PUAE_VIDEO_WIDTH_S72 || retrow == PUAE_VIDEO_WIDTH_S72 * 2))
-      visible_left_border = retro_min_diwstart;
+      retro_visible_left_border = retro_min_diwstart;
 
    /* Special DBL modes */
    if (retro_doublescan)
-      visible_left_border = retro_min_diwstart;
+      retro_visible_left_border = retro_min_diwstart;
 
    /* Manual offset override */
    if (!opt_horizontal_offset_auto)
-      visible_left_border = default_left_border + (opt_horizontal_offset * width_multiplier);
+      retro_visible_left_border = default_left_border + (opt_horizontal_offset * width_multiplier);
 
    /* Offset adjustments */
-   visible_left_border_new -= visible_left_border;
-   visible_left_border_new = (visible_left_border_new < 0) ? 0 : visible_left_border_new;
+   retro_visible_left_border_new -= retro_visible_left_border;
+   retro_visible_left_border_new = (retro_visible_left_border_new < 0) ? 0 : retro_visible_left_border_new;
 
    /* Change value only if altered */
-   if (retrox_crop != visible_left_border_new)
-      retrox_crop = visible_left_border_new;
+   if (retrox_crop != retro_visible_left_border_new)
+      retrox_crop = retro_visible_left_border_new;
 
 #if 0
-   printf("DIWSTART  :%6d DIWSTOP  :%6d   lborder:%3d old:%3d cur:%3d cropw:%3d cropx:%d\n", retro_min_diwstart, retro_max_diwstop, visible_left_border, visible_left_border_old, visible_left_border_cur, (retro_max_diwstop - retro_min_diwstart), retrox_crop);
+   printf("DIWSTART  :%6d DIWSTOP  :%6d   lborder:%3d old:%3d cur:%3d cropw:%3d cropx:%d\n", retro_min_diwstart, retro_max_diwstop, retro_visible_left_border, retro_visible_left_border_old, retro_visible_left_border_cur, (retro_max_diwstop - retro_min_diwstart), retrox_crop);
 #endif
 
-   /* Must reset drawing if internal border changes */
-   if (visible_left_border != visible_left_border_cur)
-      request_reset_drawing = true;
+   /* The left border is applied when the window is cut out of the raster
+    * (retro_video_blit), the emulation does not need to know about it */
+   (void)retro_visible_left_border_cur;
 
    /* Counter reset */
    retro_diwstartstop_counter = 0;
@@ -7580,7 +8668,12 @@ static void update_video_center_horizontal(void)
 
 static bool update_vresolution(bool update)
 {
-   int tmp_interlace_seen = retro_av_info_is_lace || retro_doublescan || gfxvidinfo->drawbuffer.tempbufferinuse;
+   /* Full motion video is shown in double line mode */
+   int tmp_interlace_seen = retro_av_info_is_lace || retro_doublescan
+#ifdef WITH_MPEG2
+       || cd32_fmv_active
+#endif
+       ;
 
    /* Lores force to single line */
    if (!(video_config & PUAE_VIDEO_HIRES) && !(video_config & PUAE_VIDEO_SUPERHIRES))
@@ -7645,7 +8738,7 @@ static void update_audiovideo(void)
       static uint8_t hsytrue_count = 0;
 
 #if 0
-      printf("BPLCON0: %x, %d, %d-%d, %d-%d\n", bplcon0, current_resolution, diwfirstword_total, diwlastword_total, retro_min_diwstart, retro_max_diwstop);
+      printf("BPLCON0: %x, %d, %d-%d\n", bplcon0, current_resolution, retro_min_diwstart, retro_max_diwstop);
 #endif
       if (opt_video_resolution_auto == RESOLUTION_AUTO_SUPERHIRES)
          opt_video_resolution_auto = RESOLUTION_AUTO_HIRES;
@@ -7657,13 +8750,12 @@ static void update_audiovideo(void)
       if (     current_resolution == RES_HIRES
             && bplcon0 == 0xC201
             && (retro_min_diwstart == 322 || retro_min_diwstart == 322 * 2)
-            && (diwlastword_total  == 898 || diwlastword_total  == 898 * 2)
+            && (retro_max_diwstop  == 898 || retro_max_diwstop  == 898 * 2)
          )
          current_resolution = RES_SUPERHIRES;
       /* Super Stardust prevent Lores */
       else if (opt_video_resolution_auto == RESOLUTION_AUTO_LORES
             && current_resolution == RES_LORES
-            && (diwlastword_total == 894 || diwlastword_total == 898 || diwlastword_total == 910 || diwlastword_total == 914 || diwlastword_total == 1860)
             && (retro_min_diwstart == 121 || retro_min_diwstart == 121 * 2 || retro_min_diwstart == 128 || retro_min_diwstart == 128 * 2 || retro_min_diwstart == 129 || retro_min_diwstart == 129 * 2)
             && (retro_max_diwstop  == 448 || retro_max_diwstop  == 448 * 2 || retro_max_diwstop  == 449 || retro_max_diwstop  == 449 * 2 || retro_max_diwstop  == 457 || retro_max_diwstop  == 457 * 2)
          )
@@ -7734,7 +8826,7 @@ static void update_audiovideo(void)
       }
 
       /* Horizontal centering calculation needs to be forced due to
-       * retro_max_diwlastword change which is crucial for visible_left_border */
+       * retro_max_diwlastword change which is crucial for retro_visible_left_border */
       if (request_init_custom)
       {
          request_init_custom_timer = 2;
@@ -8571,6 +9663,8 @@ void retro_run(void)
       /* Re-run emulation first pass */
       libretro_runloop_active = false;
       restart_pending = m68k_go(1, 0);
+      /* RAM was reallocated for the new configuration */
+      retro_update_memory_info();
    }
 
    /* Resume emulation for 1 frame (may_quit, resume) */
@@ -8581,9 +9675,16 @@ void retro_run(void)
    /* Handle statusbar text, audio filter type & video geometry + resolution */
    update_audiovideo();
 
+
    /* AV info change is requested */
    if (request_update_av_info)
       retro_update_av_info();
+
+   /* Fetch the picture from the emulation's raster: the window position
+    * and the crop rectangle are final at this point, and the raster still
+    * holds the complete frame (reset_drawing() below erases it). Statusbar
+    * and virtual keyboard are drawn on top later. */
+   retro_video_blit();
 
    /* If any drawing parameters/offsets have been modified,
     * must call reset_drawing() to ensure that the changes
@@ -8726,7 +9827,24 @@ bool retro_load_game(const struct retro_game_info *info)
     *   (see save_filesys()) and WHDLoad "Files" mode can mount up to
     *   four of them, so account for that directly rather than relying
     *   on RAM size to correlate with mounted unit count. */
+   retro_update_memory_info();
+   return true;
+}
+
+/* Save state size and memory map of the current machine. Called again
+ * after a restart (model change + reset), which reallocates the RAM. */
+static void retro_update_memory_info(void)
+{
    save_state_file_size = currprefs.chipmem.size + currprefs.bogomem.size + currprefs.fastmem[0].size + currprefs.z3fastmem[0].size;
+   /* Accelerator board and mainboard RAM (A3000 high/low, 25-bit, Z3 chip).
+    * Boards report their RAM as cpuboardmem and also map it as 25-bit or
+    * A3000 high memory, so take the larger of the two instead of the sum. */
+   {
+      size_t board = currprefs.cpuboardmem1.size + currprefs.cpuboardmem2.size;
+      size_t mapped = currprefs.mbresmem_high.size + currprefs.mem25bit.size;
+      save_state_file_size += (board > mapped ? board : mapped)
+            + currprefs.mbresmem_low.size + currprefs.z3chipmem.size;
+   }
    save_state_file_size += (size_t)(((float)save_state_file_size * 0.05f) + 0.5f);
    save_state_file_size += 128 * 1000;
    save_state_file_size += (size_t)nr_units() * 100 * 1024;
@@ -8743,7 +9861,6 @@ bool retro_load_game(const struct retro_game_info *info)
    };
 
    environ_cb(RETRO_ENVIRONMENT_SET_MEMORY_MAPS, &mmap);
-   return true;
 }
 
 void retro_unload_game(void)

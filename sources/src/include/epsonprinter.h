@@ -27,14 +27,12 @@
 #define Bits uae_s32
 #define Bit32u uae_u32
 
-#ifndef WINFONT
-#include "ft2build.h"
-#include FT_FREETYPE_H
-#endif
-
-#if defined (WIN32)
-#include <windows.h>
-#include <winspool.h>
+#ifndef PARALLEL_MATRIX_TEXT
+#define PARALLEL_MATRIX_TEXT 1
+#define PARALLEL_MATRIX_EPSON 2
+#define PARALLEL_MATRIX_EPSON9 2
+#define PARALLEL_MATRIX_EPSON24 3
+#define PARALLEL_MATRIX_EPSON48 4
 #endif
 
 #define STYLE_PROP 0x01
@@ -82,5 +80,9 @@ enum Typeface
 	svbusaba = 30,
 	svjittra = 31
 };
+
+void epson_printchar(uae_u8 c);
+int epson_init(const TCHAR *printername, int type);
+void epson_close(void);
 
 #endif /* UAE_EPSONPRINTER_H */

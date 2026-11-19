@@ -1,21 +1,29 @@
 #include "sysconfig.h"
 #include "sysdeps.h"
+#include "gdb_server.h"
 
 #include "devices.h"
 
 #include "options.h"
+#include "uae.h"
 #include "threaddep/thread.h"
 #include "memory.h"
 #include "audio.h"
+#ifdef GFXBOARD
 #include "gfxboard.h"
+#endif
 #include "scsi.h"
 #include "scsidev.h"
 #include "sana2.h"
 #include "clipboard.h"
 #include "cpuboard.h"
+#ifdef WITH_SNDBOARD
 #include "sndboard.h"
+#endif
 #include "statusline.h"
+#ifdef WITH_PPC
 #include "uae/ppc.h"
+#endif
 #ifdef CD32
 #include "cd32_fmv.h"
 #include "akiko.h"
@@ -47,24 +55,33 @@
 #include "uaenative.h"
 #endif
 #include "tabletlibrary.h"
+#ifdef WITH_LUA
 #include "luascript.h"
+#endif
 #ifdef DRIVESOUND
 #include "driveclick.h"
 #endif
+#ifdef WITH_X86
 #include "x86.h"
+#endif
 #include "ethernet.h"
 #include "drawing.h"
+#ifdef VIDEOGRAB
 #include "videograb.h"
-#include "rommgr.h"
-#include "newcpu.h"
+#endif
 #ifdef WITH_MIDIEMU
 #include "midiemu.h"
 #endif
 #ifdef RETROPLATFORM
 #include "rp.h"
 #endif
+#ifdef WITH_DRACO
 #include "draco.h"
+#endif
+#ifdef WITH_DSP
 #include "dsp3210/dsp_glue.h"
+#endif
+#include "keyboard_mcu.h"
 
 #define MAX_DEVICE_ITEMS 64
 
@@ -86,6 +103,7 @@ static void execute_device_items(DEVICE_VOID *pp, int cnt)
 	}
 }
 
+static uae_sem_t thread_sema;
 static int device_configs_cnt;
 static DEVICE_VOID device_configs[MAX_DEVICE_ITEMS];
 static int device_vsync_pre_cnt;
@@ -103,6 +121,32 @@ static DEVICE_VOID device_leaves_early[MAX_DEVICE_ITEMS];
 static int device_resets_cnt;
 static DEVICE_INT device_resets[MAX_DEVICE_ITEMS];
 static bool device_reset_done[MAX_DEVICE_ITEMS];
+static int device_callbacks_cnt;
+static DEVICE_VOID device_callbacks[MAX_DEVICE_ITEMS];
+
+void device_call_main_thread_callbacks(void)
+{
+	uae_sem_wait(&thread_sema);
+	DEVICE_VOID device_callbacks_tmp[MAX_DEVICE_ITEMS];
+	int device_callbacks_cnt_tmp = device_callbacks_cnt;
+	memcpy(device_callbacks_tmp, device_callbacks, sizeof(DEVICE_VOID) * device_callbacks_cnt);
+	device_callbacks_cnt = 0;
+	uae_sem_post(&thread_sema);
+	execute_device_items(device_callbacks_tmp, device_callbacks_cnt_tmp);
+}
+
+// queues function for execution from main thread if called from another thread
+void device_add_main_thread_callback(DEVICE_VOID p)
+{
+	if (is_mainthread()) {
+		p();
+	} else {
+		uae_sem_wait(&thread_sema);
+		add_device_item(device_callbacks, &device_callbacks_cnt, p);
+		set_special(SPCFLAG_CALLBACK);
+		uae_sem_post(&thread_sema);
+	}
+}
 
 static void reset_device_items(void)
 {
@@ -188,18 +232,24 @@ void devices_reset_ext(int hardreset)
 
 void devices_reset(int hardreset)
 {
+	gdb_server_reset();
 	memset(device_reset_done, 0, sizeof(device_reset_done));
 	// must be first
 	init_eventtab();
 #if NATMEM_OFFSET
 	init_shm();
 #endif
+
+#ifdef GFXBOARD
+	// must be before memory_reset()
+	gfxboard_reset();
+#endif
 	memory_reset();
 #ifdef AUTOCONFIG
 	rtarea_reset();
 #endif
 	DISK_reset();
-	CIA_reset();
+	CIA_reset(hardreset);
 	a1000_reset();
 #ifdef JIT
 	compemu_reset();
@@ -212,9 +262,6 @@ void devices_reset(int hardreset)
 	scsi_reset();
 	scsidev_reset();
 	scsidev_start_threads();
-#endif
-#ifdef GFXBOARD
-	gfxboard_reset ();
 #endif
 #ifdef DRIVESOUND
 	driveclick_reset();
@@ -245,6 +292,14 @@ void devices_reset(int hardreset)
 #ifdef RETROPLATFORM
 	rp_reset();
 #endif
+	keymcu_reset();
+	keymcu2_reset();
+	keymcu3_reset();
+
+	uae_sem_wait(&thread_sema);
+	device_callbacks_cnt = 0;
+	uae_sem_post(&thread_sema);
+
 	uae_int_requested = 0;
 }
 
@@ -271,7 +326,7 @@ void devices_hsync(void)
 {
 	DISK_hsync();
 	audio_hsync();
-	CIA_hsync_prehandler();
+	blitter_hsync();
 
 	decide_blitter(-1);
 #ifdef SERIAL_PORT
@@ -300,9 +355,13 @@ void devices_rethink(void)
 void devices_update_sound(float clk, float syncadjust)
 {
 	update_sound (clk);
+#ifdef WITH_SNDBOARD
 	update_sndboard_sound (clk / syncadjust);
+#endif
 	update_cda_sound(clk / syncadjust);
+#ifdef WITH_X86
 	x86_update_sound(clk / syncadjust);
+#endif
 #ifdef WITH_MIDIEMU
 	midi_update_sound(clk / syncadjust);
 #endif
@@ -317,6 +376,7 @@ void devices_update_sync(float svpos, float syncadjust)
 
 void virtualdevice_free(void)
 {
+	gdb_server_close();
 #ifdef WITH_PPC
 	// must be first
 	uae_ppc_free();
@@ -346,9 +406,12 @@ void virtualdevice_free(void)
 #ifdef WITH_LUA
 	uae_lua_free();
 #endif
+#ifdef GFXBOARD
 	gfxboard_free();
+#endif
 	savestate_free();
 	memory_cleanup();
+	rtarea_free();
 #if NATMEM_OFFSET
 	free_shm();
 #endif
@@ -357,10 +420,13 @@ void virtualdevice_free(void)
 	driveclick_free();
 #endif
 	ethernet_enumerate_free();
-	rtarea_free();
+	drawing_free();
 #ifdef WITH_DRACO
 	draco_free();
 #endif
+	keymcu_free();
+	keymcu2_free();
+	keymcu3_free();
 	execute_device_items(device_leaves, device_leave_cnt);
 }
 
@@ -375,10 +441,32 @@ void do_leave_program (void)
 	SDL_Quit();
 #endif
 	machdep_free();
+
+#ifdef _WIN32
+	if (thread_sema) {
+		uae_sem_destroy(&thread_sema);
+		thread_sema = NULL;
+	}
+#else
+	if (thread_sema.sem) {
+		uae_sem_destroy(&thread_sema);
+		thread_sema.sem = NULL;
+	}
+#endif
 }
 
 void virtualdevice_init (void)
 {
+#ifdef _WIN32
+	if (!thread_sema) {
+		uae_sem_init(&thread_sema, 0, 1);
+	}
+#else
+	if (!thread_sema.sem) {
+		uae_sem_init(&thread_sema, 0, 1);
+	}
+#endif
+
 	reset_device_items();
 
 #ifdef CD32
@@ -422,6 +510,9 @@ void virtualdevice_init (void)
 #ifdef WITH_DRACO
 	draco_init();
 #endif
+	keymcu_init();
+	keymcu2_init();
+	keymcu3_init();
 }
 
 void devices_restore_start(void)
@@ -429,7 +520,6 @@ void devices_restore_start(void)
 	restore_audio_start();
 	restore_cia_start();
 	restore_blkdev_start();
-	restore_blitter_start();
 	restore_custom_start();
 	changed_prefs.bogomem.size = 0;
 	changed_prefs.chipmem.size = 0;
@@ -444,7 +534,9 @@ void devices_restore_start(void)
 
 void devices_syncchange(void)
 {
+#ifdef WITH_X86
 	x86_bridge_sync_change();
+#endif
 }
 
 void devices_pause(void)
@@ -459,7 +551,9 @@ void devices_pause(void)
 #ifdef RETROPLATFORM
 	rp_pause(1);
 #endif
+#ifdef VIDEOGRAB
 	pausevideograb(1);
+#endif
 	ethernet_pause(1);
 }
 
@@ -475,7 +569,9 @@ void devices_unpause(void)
 #ifdef WITH_DSP
 	dsp_pause(0);
 #endif
+#ifdef VIDEOGRAB
 	pausevideograb(0);
+#endif
 	ethernet_pause(0);
 }
 

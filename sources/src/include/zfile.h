@@ -1,5 +1,4 @@
  /*
- /*
   * UAE - The Un*x Amiga Emulator
   *
   * routines to handle compressed file automatically
@@ -61,9 +60,9 @@ extern struct zfile *zfile_fopen_parent(struct zfile*, const TCHAR*, uae_u64 off
 extern uae_u8 *zfile_get_data_pointer(struct zfile *z, size_t *len);
 extern const TCHAR *zfile_get_ext(const TCHAR *);
 
-extern int zfile_exists(const TCHAR *name);
-extern void zfile_fclose(struct zfile *z);
-extern uae_s64 zfile_fseek(struct zfile *z, uae_s64 offset, int mode);
+extern int zfile_exists (const TCHAR *name);
+extern int zfile_fclose (struct zfile *z);
+extern uae_s64 zfile_fseek (struct zfile *z, uae_s64 offset, int mode);
 extern uae_s64 zfile_ftell(struct zfile *z);
 extern uae_s32 zfile_ftell32(struct zfile *z);
 extern uae_s64 zfile_size(struct zfile *z);

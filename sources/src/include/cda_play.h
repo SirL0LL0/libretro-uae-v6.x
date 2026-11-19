@@ -1,58 +1,67 @@
-#ifndef CDA_PLAY_H
-#define CDA_PLAY_H
+#ifndef WINUAE_OD_UNIX_CDA_PLAY_H
+#define WINUAE_OD_UNIX_CDA_PLAY_H
+
+#include "sysconfig.h"
+#include "sysdeps.h"
+#include "audio.h"
+#include "blkdev.h"
 
 #define CDDA_BUFFERS 14
 
 extern volatile bool cd_audio_mode_changed;
 
-#ifdef __cplusplus
-class cda_audio {
-private:
+/* Upstream declares this as a C++ class (od-unix/cda_play.cpp is compiled as
+ * C++). The libretro build compiles cda_play.c as C, so mirror the class with
+ * an equivalent struct plus plain C API. */
+struct cda_audio {
+    /* private in upstream */
     int bufsize;
     int num_sectors;
-	int sectorsize;
+    int sectorsize;
     int volume[2];
     bool playing;
     bool active;
-    int buffer_ids[2];
 
-public:
+    /* public in upstream */
     uae_u8 *buffers[2];
-
-	cda_audio(int num_sectors, int sectorsize, int samplerate);
-	~cda_audio();
-	void setvolume(int left, int right);
-	bool play(int bufnum);
-	void wait(void);
-	void wait(int bufnum);
-	bool isplaying(int bufnum);
 };
-#else
-typedef struct cda_audio cda_audio;
-#endif
 
-extern int cda_audio_bufsize;
-extern int cda_audio_volume[2];
-extern bool cda_audio_playing;
-extern bool cda_audio_active;
-extern int cda_audio_buffer_ids[2];
-extern uae_u8 *cda_audio_buffers[2];
+typedef struct cda_audio cda_audio_t;
 
-extern int cda_audio_num_sectors;
-extern int cda_audio_sectorsize;
-extern int cda_audio_samplerate;
-extern bool cda_audio_internalmode;
+extern bool  cda_audio_init(cda_audio_t *ca, int num_sectors, int sectorsize, int samplerate);
+extern void  cda_audio_free(cda_audio_t *ca);
+extern void  cda_audio_setvolume(cda_audio_t *ca, int left, int right);
 
-extern int cda_audio_setvolume;
-extern bool cda_audio_play;
-extern int cda_audio_wait;
-extern bool cda_audio_isplaying;
+struct cda_play;
+typedef int (*cda_play_read_block)(struct cda_play *, int, uae_u8 *, int, int, int);
 
-extern void cda_new(int num_sectors, int sectorsize, int samplerate);
-extern void cda_delete(void);
-extern void cda_setvolume(int left, int right);
-extern bool cda_play(int bufnum);
-extern void cda_wait(int bufnum);
-extern bool cda_isplaying(int bufnum);
+struct cda_play
+{
+    int unitnum;
+    int cdda_volume[2];
+    int cd_last_pos;
+    int cdda_play;
+    int cdda_play_finished;
+    int cdda_scan;
+    int cdda_paused;
+    int cdda_start, cdda_end;
+    play_subchannel_callback cdda_subfunc;
+    play_status_callback cdda_statusfunc;
+    int cdda_play_state;
+    int cdda_delay, cdda_delay_frames;
+    cda_audio_t *cda;
+    volatile int cda_bufon[2];
+    struct cd_audio_state cas;
+    bool subcodevalid;
+    uae_sem_t sub_sem, sub_sem2;
+    uae_u8 subcode[SUB_CHANNEL_SIZE * CDDA_BUFFERS];
+    uae_u8 subcodebuf[SUB_CHANNEL_SIZE];
+    struct device_info *di;
+    cda_play_read_block read_block;
+};
 
-#endif /* CDA_PLAY_H */
+void ciw_cdda_play(void *ciw);
+void ciw_cdda_stop(struct cda_play *ciw);
+int ciw_cdda_setstate(struct cda_play *ciw, int state, int playpos);
+
+#endif /* WINUAE_OD_UNIX_CDA_PLAY_H */

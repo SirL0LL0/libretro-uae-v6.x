@@ -97,7 +97,7 @@ extern int disk_prevnext (int drive, int dir);
 extern int disk_prevnext_name (TCHAR *img, int dir);
 extern void DISK_get_path_text(struct uae_prefs *p, int n, TCHAR *text);
 
-extern bool gui_ask_disk(int drv, TCHAR*);
+extern bool gui_ask_disk(int drv, TCHAR*, int);
 
 extern void DSKLEN (uae_u16 v, int hpos);
 extern uae_u16 DSKBYTR (int hpos);
@@ -107,7 +107,7 @@ extern void DSKPTH (uae_u16);
 extern void DSKDAT (uae_u16);
 extern uae_u16 DSKDATR (int);
 extern uae_u16 disk_dmal (void);
-extern uaecptr disk_getpt (void);
+extern uaecptr *disk_getpt (void);
 extern int disk_fifostatus (void);
 extern uae_u16 DSKBYTR_fake(int);
 

@@ -13,10 +13,11 @@
 #include "sysconfig.h"
 #include "sysdeps.h"
 
+#include "uae.h"
 #include "options.h"
 #include "zfile.h"
+#include "zfile_host.h"
 #include "disk.h"
-#include "gui.h"
 #include "crc32.h"
 #include "fsdb.h"
 #include "fsusage.h"
@@ -25,6 +26,13 @@
 #include "fdi2raw.h"
 #include "uae/io.h"
 #include "misc.h"
+// OS X does not have off64_t, fopen64, fseeko64 or ftello64, the functions are already 64bit
+#ifdef __MACH__
+#  define off64_t off_t
+#  define fopen64 fopen
+#  define fseeko64 fseeko
+#  define ftello64 ftello
+#endif
 
 #ifdef CAPS
 #include "caps.h"
@@ -140,7 +148,7 @@ static void zcache_close (void)
 	while (zc) {
 		struct zcache *n = zc->next;
 		zcache_free_data (zc);
-		xfree (n);
+		xfree(zc);
 		zc = n;
 	}
 }
@@ -201,10 +209,15 @@ static struct zfile *zfile_create (struct zfile *prev, const TCHAR *originalname
 	return z;
 }
 
-static void zfile_free (struct zfile *f)
+static int zfile_free (struct zfile *f)
 {
-	if (f->f)
-		fclose (f->f);
+	int error = 0;
+	if (f->f) {
+		error = ferror(f->f) != 0;
+		if (fclose(f->f))
+			error = 1;
+		f->f = NULL;
+	}
 	if (f->deleteafterclose) {
 		_wunlink (f->name);
 		write_log (_T("deleted temporary file '%s'\n"), f->name);
@@ -215,6 +228,7 @@ static void zfile_free (struct zfile *f)
 	xfree (f->mode);
 	xfree (f->userdata);
 	xfree (f);
+	return error;
 }
 
 void zfile_exit (void)
@@ -226,18 +240,18 @@ void zfile_exit (void)
 	}
 }
 
-void zfile_fclose (struct zfile *f)
+int zfile_fclose (struct zfile *f)
 {
 	//write_log (_T("%p\n"), f);
 	if (!f)
-		return;
+		return 0;
 	if (f->opencnt < 0) {
 		write_log (_T("zfile: tried to free already closed filehandle!\n"));
-		return;
+		return 1;
 	}
 	f->opencnt--;
 	if (f->opencnt > 0)
-		return;
+		return 0;
 	f->opencnt = -100;
 	if (f->parent) {
 		f->parent->opencnt--;
@@ -254,20 +268,21 @@ void zfile_fclose (struct zfile *f)
 	while (l != f) {
 		if (l == 0) {
 			write_log (_T("zfile: tried to free already freed or nonexisting filehandle!\n"));
-			return;
+			return 1;
 		}
 		pl = l;
 		l = l->next;
 	}
 	if (l)
 		nxt = l->next;
-	zfile_free (f);
+	int error = zfile_free (f);
 	if (l == 0)
-		return;
+		return error;
 	if(!pl)
 		zlist = nxt;
 	else
 		pl->next = nxt;
+	return error;
 }
 
 static void removeext (TCHAR *s, const TCHAR *ext)
@@ -290,7 +305,14 @@ static bool checkwrite (struct zfile *zf, int *retcode)
 
 
 static uae_u8 exeheader[]={ 0x00,0x00,0x03,0xf3,0x00,0x00,0x00,0x00 };
-static const TCHAR *diskimages[] = { _T("adf"), _T("adz"), _T("ipf"), _T("scp"), _T("fdi"), _T("dms"), _T("wrp"), _T("dsq"), _T("pkd"), _T("ima"), 0 };
+static const TCHAR *diskimages[] = {
+	_T("adf"), _T("adz"),
+#ifdef CAPS
+	_T("ipf"),
+#endif
+	_T("scp"), _T("fdi"), _T("dms"), _T("wrp"), _T("dsq"),
+	_T("pkd"), _T("ima"), 0
+};
 
 int zfile_gettype (struct zfile *z)
 {
@@ -339,8 +361,10 @@ int zfile_gettype (struct zfile *z)
 	zfile_fseek (z, -8, SEEK_CUR);
 	if (!memcmp (buf, exeheader, sizeof (buf)))
 		return ZFILE_EXECUTABLE;
+#ifdef CAPS
 	if (!memcmp (buf, "CAPS", 4))
 		return ZFILE_DISKIMAGE;
+#endif
 	if (!memcmp (buf, "SCP", 3))
 		return ZFILE_DISKIMAGE;
 	if (!memcmp (buf, "UAE--ADF", 8))
@@ -919,6 +943,11 @@ end:
 }
 
 #ifdef CAPS
+#ifdef __LIBRETRO__
+#include "caps.h"
+#else
+#include "uae/caps.h"
+#endif
 static struct zfile *ipf (struct zfile *z, int index, int *retcode)
 {
 	int i, j, r;
@@ -1162,7 +1191,10 @@ static struct zfile *wrp (struct zfile *z, int *retcode)
 
 #ifdef A_7Z
 #include "7z/Xz.h"
-#include "7z/Lzmadec.h"
+#include "7z/LzmaDec.h"
+#ifdef UAE_7Z_SDK_1604
+#define LZMA_FINISH_ANY CODER_FINISH_ANY
+#endif
 #include "7z/7zCrc.h"
 
 static void *SzAlloc (void *p, size_t size)
@@ -1320,7 +1352,14 @@ end:
 const TCHAR *uae_ignoreextensions[] =
 { _T(".gif"), _T(".jpg"), _T(".png"), _T(".xml"), _T(".pdf"), _T(".txt"), 0 };
 const TCHAR *uae_diskimageextensions[] =
-{ _T(".adf"), _T(".adz"), _T(".ipf"), _T(".scp"), _T(".fdi"), _T(".exe"), _T(".dms"), _T(".wrp"), _T(".dsq"), 0 };
+{
+	_T(".adf"), _T(".adz"),
+#ifdef CAPS
+	_T(".ipf"),
+#endif
+	_T(".scp"), _T(".fdi"), _T(".exe"), _T(".dms"), _T(".wrp"),
+	_T(".dsq"), 0
+};
 
 int zfile_is_ignore_ext (const TCHAR *name)
 {
@@ -1359,7 +1398,11 @@ int zfile_is_diskimage (const TCHAR *name)
 
 static const TCHAR *archive_extensions[] = {
 	_T("7z"), _T("rar"), _T("zip"), _T("lha"), _T("lzh"), _T("lzx"),
-	_T("adf"), _T("adz"), _T("dsq"), _T("dms"), _T("ipf"), _T("fdi"), _T("wrp"), _T("ima"),
+	_T("adf"), _T("adz"), _T("dsq"), _T("dms"),
+#ifdef CAPS
+	_T("ipf"),
+#endif
+	_T("fdi"), _T("wrp"), _T("ima"),
 	_T("hdf"), _T("tar"),
 	NULL
 };
@@ -1815,121 +1858,33 @@ static struct zfile *zfile_fopen_x (const TCHAR *name, const TCHAR *mode, int ma
 	return l;
 }
 
-#ifndef __LIBRETRO__
-#ifdef _WIN32
-static int isinternetfile (const TCHAR *name)
+static struct zfile *zfile_fopen_internet(const TCHAR *name, const TCHAR *mode, int mask)
 {
-	if (!_tcsnicmp (name, _T("http://"), 7) || !_tcsnicmp (name, _T("https://"), 8))
-		return 1;
-	if (!_tcsnicmp (name, _T("ftp://"), 6))
-		return -1;
-	return 0;
-}
-#include <wininet.h>
-#include "win32.h"
-#define INETBUFFERLEN 1000000
-static struct zfile *zfile_fopen_internet (const TCHAR *name, const TCHAR *mode, int mask)
-{
-	static HINTERNET hi;
-	HINTERNET i = NULL;
-	TCHAR tmp[MAX_DPATH];
-	DWORD ierr = 0;
-	DWORD outbuf = sizeof tmp / sizeof (TCHAR);
-	uae_u8 *data = 0;
-	int bufferlen = INETBUFFERLEN;
-	int datalen;
-	DWORD didread;
-	struct zfile *zf = NULL;
-
-	if (_tcschr (mode, 'w') || _tcschr (mode, 'a'))
+	if (_tcschr(mode, 'w') || _tcschr(mode, 'a')) {
 		return NULL;
-	tmp[0] = 0;
-	if (!hi) {
-		hi = InternetOpen (WINUAEAPPNAME, INTERNET_OPEN_TYPE_PRECONFIG_WITH_NO_AUTOPROXY, NULL, NULL, 0);
-		if (hi == NULL) {
-			write_log (_T("InternetOpen() failed, %d\n"), GetLastError ());
-			return NULL;
-		}
 	}
-	i = InternetOpenUrl (hi, name, NULL, 0, INTERNET_FLAG_NO_COOKIES, 0);
-	if (i == NULL) {
-		DWORD err = GetLastError ();
-		if (err == ERROR_INTERNET_EXTENDED_ERROR)
-			InternetGetLastResponseInfo (&ierr, tmp, &outbuf);
-		write_log (_T("InternetOpenUrl(%s) failed %d (%d,%s)\n"), name, err, ierr, tmp);
-		goto end;
+	uae_u8 *data = NULL;
+	int size = 0;
+	if (!host_read_internet_file(name, (mask & ZFD_CHECKONLY) != 0, &data, &size)) {
+		return NULL;
 	}
-
-	if (isinternetfile (name) > 0) {
-		DWORD statuscode;
-		DWORD hindex = 0;
-		DWORD size = sizeof statuscode;
-		if (!HttpQueryInfo (i, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER, &statuscode, &size, &hindex)) {
-			DWORD err = GetLastError ();
-			write_log (_T("HttpQueryInfo(%s) failed %d\n"), name, err);
-			goto end;
-		}
-		if (statuscode != 200) {
-			write_log (_T("HttpQueryInfo(%s)=%d\n"), name, statuscode);
-			goto end;
-		}
+	struct zfile *zf = zfile_create(NULL, name);
+	if (zf) {
+		zf->size = size;
+		zf->data = data;
+	} else {
+		xfree(data);
 	}
-
-	if (mask & ZFD_CHECKONLY) {
-		zf = zfile_create (NULL, name);
-		goto end;
-	}
-
-	datalen = 0;
-	data = xmalloc (uae_u8, bufferlen);
-	for (;;) {
-		if (!InternetReadFile (i, data + datalen, INETBUFFERLEN, &didread)) {
-			DWORD err = GetLastError ();
-			if (err == ERROR_INTERNET_EXTENDED_ERROR)
-				InternetGetLastResponseInfo (&ierr, tmp, &outbuf);
-			write_log (_T("InternetReadFile(%s) failed %d (%d,%s)\n"), name, err, ierr, tmp);
-			break;
-		}
-		if (didread == 0)
-			break;
-		datalen += didread;
-		if (datalen > bufferlen - INETBUFFERLEN) {
-			bufferlen += INETBUFFERLEN;
-			data = xrealloc (uae_u8, data, bufferlen);
-			if (!data) {
-				datalen = 0;
-				break;
-			}
-		}
-	}
-	if (datalen > 0) {
-		zf = zfile_create (NULL, name);
-		if (zf) {
-			zf->size = datalen;
-			zf->data = data;
-			data = NULL;
-		}
-	}
-end:
-	if (i)
-		InternetCloseHandle (i);
-	free (data);
 	return zf;
 }
-#endif
-#endif /* __LIBRETRO__ */
 
 static struct zfile *zfile_fopenx2 (const TCHAR *name, const TCHAR *mode, int mask, int index)
 {
 	struct zfile *f;
 	TCHAR tmp[MAX_DPATH];
 
-#ifndef __LIBRETRO__
-#ifdef _WIN32
-	if (isinternetfile (name))
-		return zfile_fopen_internet (name, mode, mask);
-#endif
-#endif
+	if (host_internet_file_type(name))
+		return zfile_fopen_internet(name, mode, mask);
 	f = zfile_fopen_x (name, mode, mask, index);
 	if (f)
 		return f;
@@ -2478,7 +2433,7 @@ int zfile_getc (struct zfile *z)
 
 int zfile_ferror (struct zfile *z)
 {
-	return 0;
+	return z && z->f ? ferror(z->f) : 0;
 }
 
 uae_u8 *zfile_getdata (struct zfile *z, uae_s64 offset, int len, int *outlen)

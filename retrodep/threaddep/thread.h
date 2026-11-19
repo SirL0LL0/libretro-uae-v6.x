@@ -7,6 +7,9 @@
   * Copyright 2004 Richard Drummond
   */
 
+#ifndef UAE_RETRODEP_THREAD_TH_H
+#define UAE_RETRODEP_THREAD_TH_H
+
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 typedef HANDLE uae_sem_t;
@@ -272,3 +275,5 @@ STATIC_INLINE void uae_set_thread_priority (uae_thread_id *tid, int pri)
 }
 
 #endif
+
+#endif /* UAE_RETRODEP_THREAD_TH_H */

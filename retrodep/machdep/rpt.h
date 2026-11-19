@@ -16,14 +16,12 @@
 
 extern long retro_ticks(void);
 
-STATIC_INLINE uae_s64 read_processor_time(void)
-{
-   return retro_ticks();
-}
-
+/* read_processor_time() and frame_time_t now come from uae/time.h
+ * (upstream moved them there). Keep the libretro tick source as the
+ * implementation of uae_time(), which is what uae/time.h calls. */
 STATIC_INLINE frame_time_t machdep_gethrtime (void)
 {
-   return read_processor_time();
+   return (frame_time_t)retro_ticks();
 }
 
 frame_time_t machdep_gethrtimebase (void);

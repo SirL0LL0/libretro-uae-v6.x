@@ -16,6 +16,7 @@
 #include "debug.h"
 #include "newcpu.h"
 #include "threaddep/thread.h"
+#include "machdep/maccess.h"
 #include "dsp_glue.h"
 
 #define DSP_INST_COUNT_WAIT 1000
@@ -57,11 +58,7 @@ uint32_t DSP_get_long_ext(uint32_t addr)
 	} else {
 		v = safe_memory_read(addr, 4);
 	}
-#ifdef __LIBRETRO__
-	v = bswap_32(v);
-#else
-	v = _byteswap_ulong(v);
-#endif
+	v = do_byteswap_32(v);
 	if (log_dsp) {
 		write_log("DSP LGET %08x = %08x\n", addr, v);
 	}
@@ -76,11 +73,7 @@ uint16_t DSP_get_short_ext(uint32_t addr)
 	} else {
 		v = safe_memory_read(addr, 2);
 	}
-#ifdef __LIBRETRO__
-	v = bswap_16(v);
-#else
-	v = _byteswap_ushort(v);
-#endif
+	v = do_byteswap_16(v);
 	if (log_dsp) {
 		write_log("DSP WGET %08x = %04x\n", addr, v & 0xffff);
 	}
@@ -103,11 +96,7 @@ unsigned char DSP_get_char_ext(uint32_t addr)
 
 void DSP_set_long_ext(uint32_t addr, uint32_t v)
 {
-#ifdef __LIBRETRO__
-	v = bswap_32(v);
-#else
-	v = _byteswap_ulong(v);
-#endif
+	v = do_byteswap_32(v);
 	if (log_dsp) {
 		write_log("DSP LPUT %08x = %08x\n", addr, v);
 	}
@@ -120,11 +109,7 @@ void DSP_set_long_ext(uint32_t addr, uint32_t v)
 
 void DSP_set_short_ext(uint32_t addr, uint16_t v)
 {
-#ifdef __LIBRETRO__
-	v = bswap_16(v);
-#else
-	v = _byteswap_ushort(v);
-#endif
+	v = do_byteswap_16(v);
 	if (log_dsp) {
 		write_log("DSP WPUT %08x = %04x\n", addr, v & 0xffff);
 	}

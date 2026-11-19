@@ -27,7 +27,7 @@
 #include "gui.h"
 #include "misc.h"
 
-uae_u32 max_z3fastmem;
+size_t max_z3fastmem;
 
 #if defined(NATMEM_OFFSET)
 

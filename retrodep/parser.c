@@ -741,7 +741,7 @@ void setserstat (int mask, int onoff)
 
 int setbaud (long baud)
 {
-	if(baud == 31400 && currprefs.win32_midioutdev >= -1) {
+	if(baud == 31400 && currprefs.host_midioutdev >= -1) {
 		/* MIDI baud-rate */
 		if (!midi_ready) {
 			if (Midi_Open())

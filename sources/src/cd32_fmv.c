@@ -15,11 +15,8 @@
 #include "rommgr.h"
 #include "custom.h"
 #include "newcpu.h"
-#include "zfile.h"
 #include "cd32_fmv.h"
-#include "uae.h"
 #include "debug.h"
-#include "custom.h"
 #include "audio.h"
 #include "devices.h"
 #include "threaddep/thread.h"
@@ -27,8 +24,21 @@
 #include "cda_play.h"
 #include "archivers/mp2/kjmp2.h"
 #ifdef WITH_MPEG2
+
+#ifdef WITH_MPEG2
+#ifndef WINUAE
+#ifdef __cplusplus
+extern "C" {
+#endif
+#endif
 #include "mpeg2.h"
 #include "mpeg2convert.h"
+#ifndef WINUAE
+#ifdef __cplusplus
+}
+#endif
+#endif
+#endif
 
 #define FMV_DEBUG 0
 static int fmv_audio_debug = 0;
@@ -231,7 +241,6 @@ static uae_u16 cl450_pending_interrupts;
 static uae_u16 cl450_threshold;
 static int cl450_buffer_offset;
 static int cl450_buffer_empty_cnt;
-static int libmpeg_offset;
 static uae_sem_t play_sem;
 static volatile bool fmv_bufon[2];
 static float fmv_syncadjust;
@@ -274,8 +283,11 @@ static uae_u16 l64111intmask[2], l64111intstatus[2];
 
 static uae_u16 mpeg_io_reg;
 
+#ifdef WITH_MPEG2
+static int libmpeg_offset;
 static mpeg2dec_t *mpeg_decoder;
 static const mpeg2_info_t *mpeg_info;
+#endif
 
 #if FMV_DEBUG
 static int isdebug(uaecptr addr)
@@ -372,7 +384,7 @@ static int l64111_cb_mask;
 
 static kjmp2_context_t mp2;
 #define PCM_SECTORS 4
-static cda_audio *cda;
+static cda_audio_t *cda;
 static int audio_data_remaining;
 static int audio_skip_size;
 
@@ -400,11 +412,7 @@ static void l64111_setvolume(void)
 	if (!pcmaudio)
 		return;
 	write_log(_T("L64111 mute %d\n"), volume ? 0 : 1);
-#ifdef __LIBRETRO__
-	if (cda_audio_bufsize) {
-#else
 	if (cda) {
-#endif
 		audio_cda_volume(&cas, volume, volume);
 	}
 }
@@ -809,6 +817,7 @@ static struct zfile *videodump;
 
 static void cl450_parse_frame(void)
 {
+#ifdef WITH_MPEG2
 	for (;;) {
 		mpeg2_state_t mpeg_state = mpeg2_parse(mpeg_decoder);
 		switch (mpeg_state)
@@ -851,7 +860,7 @@ static void cl450_parse_frame(void)
 			}
 			break;
 			case STATE_SEQUENCE:
-				cl450_frame_pixbytes = currprefs.color_mode != 5 ? 2 : 4;
+				cl450_frame_pixbytes = 4;
 				mpeg2_convert(mpeg_decoder, cl450_frame_pixbytes == 2 ? mpeg2convert_rgb16 : mpeg2convert_rgb32, NULL);
 				cl450_set_status(CL_INT_SEQ_V);
 				cl450_frame_rate = mpeg_info->sequence->frame_period ? 27000000 / mpeg_info->sequence->frame_period : 0;
@@ -884,6 +893,7 @@ static void cl450_parse_frame(void)
 				break;
 		}
 	}
+#endif
 }
 
 static void cl450_reset(void)
@@ -896,7 +906,6 @@ static void cl450_reset(void)
 	cl450_threshold = 4096;
 	cl450_buffer_offset = 0;
 	cl450_buffer_empty_cnt = 0;
-	libmpeg_offset = 0;
 	cl450_newpacket_mode = false;
 	cl450_newpacket_offset_write = 0;
 	cl450_newpacket_offset_read = 0;
@@ -904,8 +913,11 @@ static void cl450_reset(void)
 	cl450_videoram_read = 0;
 	cl450_videoram_cnt = 0;
 	memset(cl450_regs, 0, sizeof cl450_regs);
+#ifdef WITH_MPEG2
+	libmpeg_offset = 0;
 	if (mpeg_decoder)
 		mpeg2_reset(mpeg_decoder, 1);
+#endif
 	if (fmv_ram_bank.baseaddr) {
 		memset(fmv_ram_bank.baseaddr, 0, 0x100);
 		write_log(_T("CL450 reset\n"));
@@ -1386,11 +1398,7 @@ static void fmv_next_cd_audio_buffer_callback(int bufnum, void *param)
 		fmv_bufon[bufnum] = 0;
 		bufnum = 1 - bufnum;
 		if (fmv_bufon[bufnum])
-#ifdef __LIBRETRO__
-			audio_cda_new_buffer(&cas, (uae_s16*)cda_audio_buffers[bufnum], PCM_SECTORS * KJMP2_SAMPLES_PER_FRAME, bufnum, fmv_next_cd_audio_buffer_callback, param);
-#else
 			audio_cda_new_buffer(&cas, (uae_s16*)cda->buffers[bufnum], PCM_SECTORS * KJMP2_SAMPLES_PER_FRAME, bufnum, fmv_next_cd_audio_buffer_callback, param);
-#endif
 		else
 			bufnum = -1;
 	}
@@ -1400,7 +1408,7 @@ static void fmv_next_cd_audio_buffer_callback(int bufnum, void *param)
 	uae_sem_post(&play_sem);
 }
 
-void cd32_fmv_vsync_handler(void)
+static void cd32_fmv_vsync_handler(void)
 {
 }
 
@@ -1413,22 +1421,18 @@ static void cd32_fmv_audio_handler(void)
 	if (!fmv_ram_bank.baseaddr)
 		return;
 
-#ifdef __LIBRETRO__
-	if (cd_audio_mode_changed || (cl450_play && !cda_audio_bufsize)) {
-#else
 	if (cd_audio_mode_changed || (cl450_play && !cda)) {
-#endif
 		cd_audio_mode_changed = false;
 		if (cl450_play) {
 			audio_cda_new_buffer(&cas, NULL, -1, -1, NULL, NULL);
 			fmv_bufon[0] = fmv_bufon[1] = 0;
-#ifdef __LIBRETRO__
-			cda_delete();
-			cda_new (PCM_SECTORS, KJMP2_SAMPLES_PER_FRAME * 4, 44100);
-#else
-			delete cda;
-			cda = new cda_audio(PCM_SECTORS, KJMP2_SAMPLES_PER_FRAME * 4, 44100);
-#endif
+			if (cda) {
+				cda_audio_free(cda);
+				xfree(cda);
+			}
+			cda = xcalloc(cda_audio_t, 1);
+			if (cda)
+				cda_audio_init(cda, PCM_SECTORS, KJMP2_SAMPLES_PER_FRAME * 4, 44100);
 			l64111_setvolume();
 		}
 	}
@@ -1442,11 +1446,7 @@ static void cd32_fmv_audio_handler(void)
 		cl450_buffer_empty_cnt = 0;
 	}
 
-#ifdef __LIBRETRO__
-	if (!cda_audio_bufsize || !(l64111_regs[A_CONTROL1] & 1))
-#else
 	if (!cda || !(l64111_regs[A_CONTROL1] & 1))
-#endif
 		return;
 	play0 = fmv_bufon[0];
 	play1 = fmv_bufon[1];
@@ -1470,11 +1470,7 @@ static void cd32_fmv_audio_handler(void)
 	}
 	for (int i = 0; i < PCM_SECTORS; i++) {
 		int offset2 = (offset + i) & l64111_cb_mask;
-#ifdef __LIBRETRO__
-		memcpy(cda_audio_buffers[bufnum] + i * KJMP2_SAMPLES_PER_FRAME * 4, pcmaudio[offset2].pcm, KJMP2_SAMPLES_PER_FRAME * 4);
-#else
 		memcpy(cda->buffers[bufnum] + i * KJMP2_SAMPLES_PER_FRAME * 4, pcmaudio[offset2].pcm, KJMP2_SAMPLES_PER_FRAME * 4);
-#endif
 		pcmaudio[offset2].ready = false;
 	}
 	if (!play0 && !play1) {
@@ -1554,25 +1550,20 @@ static void cd32_fmv_free(void)
 	audioram = NULL;
 	xfree(videoram);
 	videoram = NULL;
-#ifdef __LIBRETRO__
-	if (cda_audio_bufsize) {
-#else
 	if (cda) {
-#endif
 		fmv_next_cd_audio_buffer_callback(-1, NULL);
-#ifdef __LIBRETRO__
-		cda_delete();
-#else
-		delete cda;
-#endif
+		cda_audio_free(cda);
+		xfree(cda);
 	}
 	cda = NULL;
 	uae_sem_destroy(&play_sem);
 	xfree(pcmaudio);
 	pcmaudio = NULL;
+#ifdef WITH_MPEG2
 	if (mpeg_decoder)
 		mpeg2_close(mpeg_decoder);
 	mpeg_decoder = NULL;
+#endif
 	cl450_reset();
 	l64111_reset();
 }
@@ -1612,10 +1603,12 @@ addrbank *cd32_fmv_init (struct autoconfig_info *aci)
 	if (!pcmaudio)
 		pcmaudio = xcalloc(struct fmv_pcmaudio, L64111_CHANNEL_BUFFERS);
 	kjmp2_init(&mp2);
+#ifdef WITH_MPEG2
 	if (!mpeg_decoder) {
 		mpeg_decoder = mpeg2_init();
 		mpeg_info = mpeg2_info(mpeg_decoder);
 	}
+#endif
 	memset(&cas, 0, sizeof(cas));
 	fmv_bank.mask = fmv_board_size - 1;
 	map_banks(&fmv_rom_bank, (fmv_start + ROM_BASE) >> 16, fmv_rom_size >> 16, 0);

@@ -13,7 +13,15 @@
 #include "readcpu.h"
 #include "machdep/m68k.h"
 #include "events.h"
+
+#ifdef WITH_SOFTFLOAT
 #include <softfloat/softfloat.h>
+#elif defined(__LIBRETRO__)
+/* The libretro core builds the softfloat FPU (fpp_softfloat.c / softfloat*.c)
+ * but does not define WITH_SOFTFLOAT, so pull in floatx80/float_status here the
+ * way the pre-sync tree did, unconditionally of that switch. */
+#include <softfloat/softfloat.h>
+#endif
 
 #ifndef SET_CFLG
 
@@ -70,7 +78,9 @@ struct cputbl {
 	uae_s8 length;
 	uae_s8 disp020[2];
 	uae_s8 branch;
+#ifdef JIT
 	uae_u16 specific;
+#endif
 };
 
 #ifdef JIT
@@ -96,7 +106,9 @@ extern cpuop_func *loop_mode_table[];
 
 extern uae_u32 REGPARAM3 op_illg(uae_u32) REGPARAM;
 extern void REGPARAM3 op_illg_noret(uae_u32) REGPARAM;
+void REGPARAM3 op_illg_1_noret(uae_u32 opcode) REGPARAM;
 extern void REGPARAM3 op_unimpl(uae_u32) REGPARAM;
+void REGPARAM3 op_unimpl_1_noret(uae_u32 opcode) REGPARAM;
 
 typedef uae_u8 flagtype;
 
@@ -163,7 +175,11 @@ typedef struct {
 
 typedef struct
 {
+/* The libretro core uses the softfloat FPU (fpp_softfloat.c) even though it does
+ * not define WITH_SOFTFLOAT, exactly like the pre-sync tree: keep fpx available. */
+#if defined(WITH_SOFTFLOAT) || defined(__LIBRETRO__)
 	floatx80 fpx;
+#endif
 #ifdef MSVC_LONG_DOUBLE
 	union {
 		fptype fp;
@@ -173,6 +189,20 @@ typedef struct
 	fptype fp;
 #endif
 } fpdata;
+
+#ifdef CPU_AARCH64
+#ifdef JIT
+#include "jit/comptbl.h"
+#include "jit/compemu.h"
+#endif
+#endif
+
+/* alignas() is C++11/C11; the libretro core is built as gnu99 */
+#ifdef __cplusplus
+#define UAE_ALIGNAS64 alignas(64)
+#else
+#define UAE_ALIGNAS64 __attribute__((aligned(64)))
+#endif
 
 struct regstruct
 {
@@ -187,8 +217,13 @@ struct regstruct
 	uae_u32 trace_pc;
 
 	uae_u16 irc, ir, ird;
-	volatile uae_atomic spcflags;
-	uae_u32 last_prefetch;
+	// A cache line of its own: with the threaded CPU the main thread reads
+	// and sets it all the time, and sharing a line with fields the CPU writes
+	// per instruction (opcode, instruction_pc) cost the threaded
+	// interpreter ~8 % host time; which fields shared it depended on where
+	// the linker happened to place regs.
+	UAE_ALIGNAS64 volatile uae_atomic spcflags;
+	UAE_ALIGNAS64 uae_u32 last_prefetch;
 	uae_u32 chipset_latch_rw;
 	uae_u32 chipset_latch_read;
 	uae_u32 chipset_latch_write;
@@ -268,6 +303,20 @@ struct regstruct
 	int ce020_tail;
 	evt_t ce020_tail_cycles;
 	int memory_waitstate_cycles;
+
+#ifdef CPU_AARCH64
+#ifdef JIT
+	/* store scratch regs also in this struct to avoid load of mem pointer */
+	uae_u32 scratchregs[VREGS - S1];
+	fpu_register scratchfregs[VFREGS - 8];
+	uae_u32 jit_exception;
+
+	/* pointer to real arrays/structs for easier access in JIT */
+	uae_u32* raw_cputbl_count;
+	uintptr mem_banks;
+	uintptr cache_tags;
+#endif
+#endif
 };
 
 extern struct regstruct regs;
@@ -322,24 +371,25 @@ extern bool m68k_interrupt_delay;
 
 extern void safe_interrupt_set(int, int, bool);
 
-#define SPCFLAG_CPUINRESET 2
-#define SPCFLAG_COPPER 4
-#define SPCFLAG_INT 8
-#define SPCFLAG_BRK 16
-#define SPCFLAG_UAEINT 32
-#define SPCFLAG_TRACE 64
-#define SPCFLAG_DOTRACE 128
-#define SPCFLAG_DOINT 256 /* arg, JIT fails without this.. */
-#define SPCFLAG_BLTNASTY 512
-#define SPCFLAG_EXEC 1024
-#define SPCFLAG_ACTION_REPLAY 2048
-#define SPCFLAG_TRAP 4096 /* enforcer-hack */
-#define SPCFLAG_MODE_CHANGE 8192
+#define SPCFLAG_CPUINRESET	0x000002
+#define SPCFLAG_CPU_SLOW	0x000004
+#define SPCFLAG_INT			0x000008
+#define SPCFLAG_BRK			0x000010
+#define SPCFLAG_UAEINT		0x000020
+#define SPCFLAG_TRACE		0x000040
+#define SPCFLAG_DOTRACE		0x000080
+#define SPCFLAG_DOINT		0x000100 /* arg, JIT fails without this.. */
+#define SPCFLAG_BLTNASTY	0x000200
+#define SPCFLAG_EXEC		0x000400
+#define SPCFLAG_ACTION_REPLAY 0x000800
+#define SPCFLAG_TRAP		0x001000 /* enforcer-hack */
+#define SPCFLAG_MODE_CHANGE	0x002000
 #ifdef JIT
-#define SPCFLAG_END_COMPILE 16384
+#define SPCFLAG_END_COMPILE	0x004000
 #endif
-#define SPCFLAG_CHECK 32768
-#define SPCFLAG_MMURESTART 65536
+#define SPCFLAG_CHECK		0x008000
+#define SPCFLAG_MMURESTART	0x010000
+#define SPCFLAG_CALLBACK	0x020000
 
 STATIC_INLINE void set_special_exter(uae_u32 x)
 {
@@ -732,11 +782,10 @@ extern void init_m68k (void);
 #ifdef __LIBRETRO__
 extern int m68k_go (int, int);
 #else
-extern void m68k_go (int);
+extern void m68k_run(void);
 #endif
 extern void m68k_dumpstate(uaecptr *, uaecptr);
 extern void m68k_dumpcache(bool);
-extern bool m68k_readcache(uaecptr memaddr, bool dc, uae_u32* valp);
 extern int getMulu68kCycles(uae_u16 src);
 extern int getMuls68kCycles(uae_u16 src);
 extern int getDivu68kCycles (uae_u32 dividend, uae_u16 divisor);
@@ -885,7 +934,7 @@ extern bool can_cpu_tracer (void);
 #define CPU_HALT_ACCELERATOR_CPU_FALLBACK 4
 #define CPU_HALT_ALL_CPUS_STOPPED 5
 #define CPU_HALT_FAKE_DMA 6
-#define CPU_HALT_AUTOCONFIG_CONFLICT 7
+//#define CPU_HALT_AUTOCONFIG_CONFLICT 7
 #define CPU_HALT_PCI_CONFLICT 8
 #define CPU_HALT_CPU_STUCK 9
 #define CPU_HALT_SSP_IN_NON_EXISTING_ADDRESS 10
@@ -895,5 +944,20 @@ extern bool can_cpu_tracer (void);
 
 uae_u32 process_cpu_indirect_memory_read(uae_u32 addr, int size);
 void process_cpu_indirect_memory_write(uae_u32 addr, uae_u32 data, int size);
+
+const struct cputbl *uaegetjitcputbl(void);
+const struct cputbl *getjitcputbl(int cpulvl, int direct);
+
+
+#if defined(DEBUGGER) && defined(GDBSERVER)
+// Read-only fault metadata, captured before exception-frame construction.
+struct cpu_debug_fault {
+	bool memory = false;
+	uae_u32 address = 0, status = 0;
+	int access = 0; // 1 read, 2 write, 3 read-modify-write, 0 unknown
+	int size = 0, function_code = -1;
+};
+extern cpu_debug_fault cpu_get_debug_fault(int vector);
+#endif
 
 #endif /* UAE_NEWCPU_H */

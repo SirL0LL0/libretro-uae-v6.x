@@ -29,23 +29,26 @@
 #include "uae.h"
 #include "memory.h"
 #include "rommgr.h"
-#include "custom.h"
 #include "newcpu.h"
-#include "debug.h"
 #include "scsi.h"
 #include "threaddep/thread.h"
 #include "a2091.h"
-#include "blkdev.h"
-#include "gui.h"
 #include "zfile.h"
 #include "filesys.h"
 #include "autoconf.h"
 #include "cdtv.h"
-#include "savestate.h"
 #include "cpuboard.h"
 #include "rtc.h"
 #include "devices.h"
+#include "debug.h"
+#ifdef WITH_DSP
 #include "dsp3210/dsp_glue.h"
+#else
+/* Upstream declares this in dsp3210/dsp_glue.h, which is only included
+ * when WITH_DSP is defined, but the SuperDMAC register mapping below uses
+ * it unconditionally. */
+extern bool is_dsp_installed;
+#endif
 
 #define DMAC_8727_ROM_VECTOR 0x8000
 #define CDMAC_ROM_VECTOR 0x2000
@@ -659,16 +662,19 @@ static void setphase(struct wd_chip_state *wd, uae_u8 phase)
 	wd->wdregs[WD_COMMAND_PHASE] = phase;
 }
 
-static bool dmacheck_a2091 (struct wd_state *wd)
+static bool dmacheck_a2091(struct wd_state *wd, int size)
 {
-	wd->cdmac.dmac_acr++;
+	if (!wd->cdmac.old_dmac && size == 4 && (wd->cdmac.dmac_acr & 2)) {
+		wd->cdmac.dmac_acr += 2;
+	} else {
+		wd->cdmac.dmac_acr += size;
+	}
 	if (wd->cdmac.old_dmac && (wd->cdmac.dmac_cntr & CNTR_TCEN)) {
 		if (wd->cdmac.dmac_wtc == 0) {
 			wd->cdmac.dmac_istr |= ISTR_E_INT;
 			return true;
 		} else {
-			if ((wd->cdmac.dmac_acr & 1) == 1)
-				wd->cdmac.dmac_wtc--;
+			wd->cdmac.dmac_wtc--;
 		}
 	}
 	return false;
@@ -759,27 +765,47 @@ static bool do_dma_commodore_8727(struct wd_state *wd, struct scsi_data *scsi)
 	return false;
 }
 
-static bool do_dma_commodore(struct wd_state *wd, struct scsi_data *scsi)
+static bool do_dma_commodore(struct wd_state *wd, struct scsi_data *scsi, bool sdmac)
 {
-	if (wd->cdtv)
+	if (wd->cdtv) {
 		cdtv_getdmadata(&wd->cdmac.dmac_acr);
+	}
+	int size = sdmac && wd->cdmac.old_dmac ? 4 : 2;
+
 	if (scsi->direction < 0) {
 #if WD33C93_DEBUG || XT_DEBUG > 0
 		uaecptr odmac_acr = wd->cdmac.dmac_acr;
 #endif
 		bool run = true;
 		while (run) {
-			uae_u8 v;
-			int status = scsi_receive_data(scsi, &v, true);
-			dma_put_byte(wd->cdmac.dmac_acr & wd->dma_mask, v);
-			if (wd->wc.wd_dataoffset < sizeof wd->wc.wd_data)
-				wd->wc.wd_data[wd->wc.wd_dataoffset++] = v;
-			if (decreasetc (&wd->wc))
+			int got = 0;
+			uae_u8 data[4];
+			for (int i = 0; i < size && run; i++) {
+				int status = scsi_receive_data(scsi, &data[i], true);
+				if (status >= 0) {
+					got++;
+					if (decreasetc(&wd->wc)) {
+						run = false;
+						break;
+					}
+					if (wd->wc.wd_dataoffset < sizeof wd->wc.wd_data) {
+						wd->wc.wd_data[wd->wc.wd_dataoffset++] = data[i];
+					}
+					if (status > 0) {
+						run = false;
+					}
+				}
+			}
+			if (got == size) {
+				if (size == 2) {
+					dma_put_word(wd->cdmac.dmac_acr & wd->dma_mask, (data[0] << 8) | (data[1] << 0));
+				} else {
+					dma_put_long(wd->cdmac.dmac_acr & wd->dma_mask, (data[0] << 24) | (data[1] << 16) | (data[2] << 8) | (data[3] << 0));
+				}
+			}
+			if (dmacheck_a2091(wd, size)) {
 				run = false;
-			if (dmacheck_a2091 (wd))
-				run = false;
-			if (status)
-				run = false;
+			}
 		}
 #if WD33C93_DEBUG || XT_DEBUG > 0
 		write_log (_T("%s Done DMA from WD, %d/%d %08X\n"), WD33C93, scsi->offset, scsi->data_len, odmac_acr);
@@ -791,17 +817,34 @@ static bool do_dma_commodore(struct wd_state *wd, struct scsi_data *scsi)
 #endif
 		bool run = true;
 		while (run) {
-			int status;
-			uae_u8 v = dma_get_byte(wd->cdmac.dmac_acr & wd->dma_mask);
-			if (wd->wc.wd_dataoffset < sizeof wd->wc.wd_data)
-				wd->wc.wd_data[wd->wc.wd_dataoffset++] = v;
-			status = scsi_send_data (scsi, v);
-			if (decreasetc (&wd->wc))
+			uae_u8 data[4];
+			if (size == 2) {
+				uae_u16 v = dma_get_word(wd->cdmac.dmac_acr & wd->dma_mask);
+				data[0] = v >> 8;
+				data[1] = v & 0xff;
+			} else {
+				uae_u32 v = dma_get_long(wd->cdmac.dmac_acr & wd->dma_mask);
+				data[0] = v >> 24;
+				data[1] = v >> 16;
+				data[2] = v >> 8;
+				data[3] = v & 0xff;
+			}
+			for (int i = 0; i < size && run; i++) {
+				if (wd->wc.wd_dataoffset < sizeof wd->wc.wd_data) {
+					wd->wc.wd_data[wd->wc.wd_dataoffset++] = data[i];
+				}
+				int status = scsi_send_data(scsi, data[i]);
+				if (decreasetc(&wd->wc)) {
+					run = false;
+					break;
+				}
+				if (status > 0) {
+					run = false;
+				}
+			}
+			if (dmacheck_a2091(wd, size)) {
 				run = false;
-			if (dmacheck_a2091 (wd))
-				run = false;
-			if (status)
-				run = false;
+			}
 		}
 #if WD33C93_DEBUG || XT_DEBUG > 0
 		write_log (_T("%s Done DMA to WD, %d/%d %08x\n"), WD33C93, scsi->offset, scsi->data_len, odmac_acr);
@@ -923,8 +966,9 @@ static bool do_dma(struct wd_state *wd)
 	switch (wd->dmac_type)
 	{
 		case COMMODORE_DMAC:
+		return do_dma_commodore(wd, scsi, false);
 		case COMMODORE_SDMAC:
-		return do_dma_commodore(wd, scsi);
+		return do_dma_commodore(wd, scsi, true);
 		case COMMODORE_8727:
 		return do_dma_commodore_8727(wd, scsi);
 		case GVP_DMAC_S2:
@@ -1562,9 +1606,18 @@ static void scsi_hsync(void)
 
 static int writeonlyreg (int reg)
 {
-	if (reg == WD_SCSI_STATUS)
+	if (reg == WD_SCSI_STATUS || reg == WD_AUXILIARY_STATUS)
 		return 1;
 	return 0;
+}
+
+static bool invalidreg (struct wd_chip_state *wd, int reg)
+{
+	// Registers after queue tag and before auxiliary status are undriven.
+	if (reg > WD_QUEUE_TAG && reg < WD_AUXILIARY_STATUS)
+		return true;
+	// queue tag is B revision only
+	return reg == WD_QUEUE_TAG && wd->wd33c93_ver < 2;
 }
 
 static void writewdreg (struct wd_chip_state *wd, int sasr, uae_u8 val)
@@ -1578,10 +1631,7 @@ static void writewdreg (struct wd_chip_state *wd, int sasr, uae_u8 val)
 			val &= ~0x20;
 		break;
 	}
-	if (sasr > WD_QUEUE_TAG && sasr < WD_AUXILIARY_STATUS)
-		return;
-	// queue tag is B revision only
-	if (sasr == WD_QUEUE_TAG && wd->wd33c93_ver < 2)
+	if (invalidreg(wd, sasr))
 		return;
 	wd->wdregs[sasr] = val;
 }
@@ -1658,7 +1708,7 @@ uae_u8 wdscsi_get (struct wd_chip_state *wd, struct wd_state *wds)
 	uae_u8 osasr = wd->sasr;
 #endif
 
-	v = wd->wdregs[wd->sasr];
+	v = invalidreg(wd, wd->sasr) ? 0xff : wd->wdregs[wd->sasr];
 	if (wd->sasr == WD_DATA) {
 		if (!wd->wd_data_avail) {
 			write_log (_T("%s WD_DATA READ without data request!? %08x\n"), WD33C93, M68K_GETPC);
@@ -1709,7 +1759,7 @@ uae_u8 wdscsi_get (struct wd_chip_state *wd, struct wd_state *wds)
 	return v;
 }
 
-uae_u8 wdscsi_get_data(struct wd_chip_state *wd, struct wd_state *wds)
+static uae_u8 wdscsi_get_data(struct wd_chip_state *wd, struct wd_state *wds)
 {
 	uae_u8 sasr = wd->sasr;
 	wd->sasr = WD_DATA;
@@ -3056,8 +3106,6 @@ static void REGPARAM2 comspec_lput (uaecptr addr, uae_u32 b)
 
 /* GVP Series I and II */
 
-extern const addrbank gvp_bank;
-
 static uae_u32 dmac_gvp_read_byte(struct wd_state *wd, uaecptr addr)
 {
 	uae_u32 v = 0;
@@ -3566,12 +3614,22 @@ static uae_u8 *REGPARAM2 dmac_gvp_xlate(uaecptr addr)
 
 /* SUPERDMAC (A3000 mainboard built-in) */
 
+static uae_u32 mbdmac_reg_address (uae_u32 addr)
+{
+	return addr & (is_dsp_installed ? 0xff : 0x7f);
+}
+
+static bool mbdmac_unmapped_access (uaecptr addr, int size)
+{
+	return (addr & 0xffff) + (1 << size) > 0x4000;
+}
+
 static void mbdmac_write_word (struct wd_state *wd, uae_u32 addr, uae_u32 val)
 {
 #if A3000_DEBUG_IO > 1
 	write_log (_T("DMAC_WWRITE %08X=%04X PC=%08X\n"), addr, val & 0xffff, M68K_GETPC);
 #endif
-	addr &= 0xfffe;
+	addr = mbdmac_reg_address(addr) & 0xfe;
 	switch (addr)
 	{
 	case 0x02:
@@ -3579,7 +3637,7 @@ static void mbdmac_write_word (struct wd_state *wd, uae_u32 addr, uae_u32 val)
 		break;
 	case 0x04:
 		wd->cdmac.dmac_wtc &= 0x0000ffff;
-		wd->cdmac.dmac_wtc |= val << 16;
+		wd->cdmac.dmac_wtc |= (val & 0xfff) << 16;
 		break;
 	case 0x06:
 		wd->cdmac.dmac_wtc &= 0xffff0000;
@@ -3596,7 +3654,7 @@ static void mbdmac_write_word (struct wd_state *wd, uae_u32 addr, uae_u32 val)
 		break;
 	case 0x0e:
 		wd->cdmac.dmac_acr &= 0xffff0000;
-		wd->cdmac.dmac_acr |= val & 0xfffe;
+		wd->cdmac.dmac_acr |= val & (wd->cdmac.old_dmac ? 0xfffc : 0xfffe);
 		break;
 	case 0x12:
 		if (wd->cdmac.dmac_dma <= 0)
@@ -3628,9 +3686,11 @@ static void mbdmac_write_word (struct wd_state *wd, uae_u32 addr, uae_u32 val)
 		break;
 	case 0x5e:
 	case 0x80:
+#ifdef WITH_DSP
 		if (is_dsp_installed) {
 			dsp_write(val);
 		}
+#endif
 		break;
 	}
 }
@@ -3640,7 +3700,7 @@ static void mbdmac_write_byte (struct wd_state *wd, uae_u32 addr, uae_u32 val)
 #if A3000_DEBUG_IO > 1
 	write_log (_T("DMAC_BWRITE %08X=%02X PC=%08X\n"), addr, val & 0xff, M68K_GETPC);
 #endif
-	addr &= 0xffff;
+	addr = mbdmac_reg_address(addr);
 	switch (addr)
 	{
 
@@ -3654,9 +3714,11 @@ static void mbdmac_write_byte (struct wd_state *wd, uae_u32 addr, uae_u32 val)
 		break;
 	case 0x5f:
 	case 0x80:
+#ifdef WITH_DSP
 		if (is_dsp_installed) {
 			dsp_write(val);
 		}
+#endif
 		break;
 	default:
 		if (addr & 1)
@@ -3673,15 +3735,25 @@ static uae_u32 mbdmac_read_word (struct wd_state *wd, uae_u32 addr)
 #endif
 	uae_u32 v = 0xffffffff;
 
-	addr &= 0xfffe;
+	addr = mbdmac_reg_address(addr) & 0xfe;
 	switch (addr)
 	{
 	case 0x02:
 		v = wd->cdmac.dmac_dawr;
 		break;
 	case 0x04:
+		if (wd->cdmac.old_dmac) {
+			v = wd->cdmac.dmac_wtc >> 16;
+		} else {
+			v = 0xffff;
+		}
+		break;
 	case 0x06:
-		v = 0xffff;
+		if (wd->cdmac.old_dmac) {
+			v = wd->cdmac.dmac_wtc;
+		} else {
+			v = 0xffff;
+		}
 		break;
 	case 0x0a:
 		v = wd->cdmac.dmac_cntr;
@@ -3726,9 +3798,11 @@ static uae_u32 mbdmac_read_word (struct wd_state *wd, uae_u32 addr)
 		break;
 	case 0x5e:
 	case 0x80:
+#ifdef WITH_DSP
 		if (is_dsp_installed) {
 			v = dsp_read();
 		}
+#endif
 		break;
 	}
 #if A3000_DEBUG_IO > 1
@@ -3744,7 +3818,7 @@ static uae_u32 mbdmac_read_byte (struct wd_state *wd, uae_u32 addr)
 #endif
 	uae_u32 v = 0xffffffff;
 
-	addr &= 0xffff;
+	addr = mbdmac_reg_address(addr);
 	switch (addr)
 	{
 	case 0x41:
@@ -3762,9 +3836,11 @@ static uae_u32 mbdmac_read_byte (struct wd_state *wd, uae_u32 addr)
 		break;
 	case 0x5f:
 	case 0x80:
+#ifdef WITH_DSP
 		if (is_dsp_installed) {
 			v = dsp_read();
 		}
+#endif
 		break;
 	}
 #if A3000_DEBUG_IO > 1
@@ -3784,37 +3860,63 @@ static void REGPARAM3 mbdmac_bput (uaecptr, uae_u32) REGPARAM;
 static uae_u32 REGPARAM2 mbdmac_lget (uaecptr addr)
 {
 	uae_u32 v;
-	v =  mbdmac_read_word (wd_a3000, addr + 0) << 16;
-	v |= mbdmac_read_word (wd_a3000, addr + 2) << 0;
+	if (mbdmac_unmapped_access(addr, sz_long)) {
+		v = dummy_get(addr, sz_long, false, 0);
+	} else {
+		v =  mbdmac_read_word (wd_a3000, addr + 0) << 16;
+		v |= mbdmac_read_word (wd_a3000, addr + 2) << 0;
+	}
 	return v;
 }
 static uae_u32 REGPARAM2 mbdmac_wget (uaecptr addr)
 {
 	uae_u32 v;
-	v =  mbdmac_read_word (wd_a3000, addr);
+	if (mbdmac_unmapped_access(addr, sz_word)) {
+		v = dummy_get(addr, sz_word, false, 0);
+	} else {
+		v =  mbdmac_read_word (wd_a3000, addr);
+	}
 	return v;
 }
 static uae_u32 REGPARAM2 mbdmac_bget (uaecptr addr)
 {
-	return mbdmac_read_byte (wd_a3000, addr);
+	uae_u32 v;
+	if (mbdmac_unmapped_access(addr, sz_byte)) {
+		v = dummy_get(addr, sz_byte, false, 0);
+	} else {
+		v = mbdmac_read_byte (wd_a3000, addr);
+	}
+	return v;
 }
 static void REGPARAM2 mbdmac_lput (uaecptr addr, uae_u32 l)
 {
-	if ((addr & 0xffff) == 0x40) {
-		// long write to 0x40 = write byte to SASR
-		mbdmac_write_byte (wd_a3000, 0x41, l);
+	if (mbdmac_unmapped_access(addr, sz_long)) {
+		dummy_put(addr, sz_long, l);
 	} else {
-		mbdmac_write_word (wd_a3000, addr + 0, l >> 16);
-		mbdmac_write_word (wd_a3000, addr + 2, l >> 0);
+		if (mbdmac_reg_address(addr) == 0x40) {
+			// long write to 0x40 = write byte to SASR
+			mbdmac_write_byte (wd_a3000, 0x41, l);
+		} else {
+			mbdmac_write_word (wd_a3000, addr + 0, l >> 16);
+			mbdmac_write_word (wd_a3000, addr + 2, l >> 0);
+		}
 	}
 }
 static void REGPARAM2 mbdmac_wput (uaecptr addr, uae_u32 w)
 {
-	mbdmac_write_word (wd_a3000, addr + 0, w);
+	if (mbdmac_unmapped_access(addr, sz_word)) {
+		dummy_put(addr, sz_word, w);
+	} else {
+		mbdmac_write_word (wd_a3000, addr + 0, w);
+	}
 }
 static void REGPARAM2 mbdmac_bput (uaecptr addr, uae_u32 b)
 {
-	mbdmac_write_byte (wd_a3000, addr, b);
+	if (mbdmac_unmapped_access(addr, sz_byte)) {
+		dummy_put(addr, sz_byte, b);
+	} else {
+		mbdmac_write_byte (wd_a3000, addr, b);
+	}
 }
 
 static addrbank mbdmac_a3000_bank = {
@@ -3958,6 +4060,7 @@ bool a3000scsi_init(struct autoconfig_info *aci)
 	wd->configured = -1;
 	wd->baseaddress = 0xdd0000;
 	wd->dmac_type = COMMODORE_SDMAC;
+	wd->cdmac.old_dmac = currprefs.cs_ramseyrev < 0x0f;
 	map_banks(&mbdmac_a3000_bank, wd->baseaddress >> 16, 1, 0);
 	wd_cmd_reset (&wd->wc, false, false);
 	reset_dmac(wd);
@@ -3970,7 +4073,8 @@ static void a3000scsi_free (void)
 	struct wd_state *wd = wd_a3000;
 	if (!wd)
 		return;
-	freencrunit(wd);
+	/* Stop the thread before freencrunit() frees wd (it was read after
+	 * the free) */
 	if (wd->scsi_thread_running > 0) {
 		wd->scsi_thread_running = 0;
 		write_comm_pipe_u32 (&wd->requests, 0xffffffff, 1);
@@ -3978,6 +4082,7 @@ static void a3000scsi_free (void)
 			sleep_millis (10);
 		wd->scsi_thread_running = 0;
 	}
+	freencrunit(wd);
 }
 
 void a2090_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc)

@@ -61,7 +61,6 @@ int get_fs_usage (const TCHAR *path, const TCHAR *disk, struct fs_usage *fsp)
 #else
 
 #ifdef WINDOWS
-#include "od-win32/posixemu.h"
 #include <windows.h>
 int get_fs_usage (const TCHAR *path, const TCHAR *disk, struct fs_usage *fsp)
 {
@@ -114,7 +113,7 @@ int statfs ();
 # include <sys/mount.h>
 #endif
 
-#if HAVE_SYS_VFS_H
+#if HAVE_SYS_VFS_H and !defined(__MACH__)
 # include <sys/vfs.h>
 #endif
 
@@ -130,7 +129,7 @@ int statfs ();
 # include <fcntl.h>
 #endif
 
-#if HAVE_SYS_STATFS_H
+#if HAVE_SYS_STATFS_H and !defined(__MACH__)
 # include <sys/statfs.h>
 #endif
 

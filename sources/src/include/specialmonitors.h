@@ -4,9 +4,8 @@
 #include "memory.h"
 
 bool emulate_specialmonitors(struct vidbuffer *src, struct vidbuffer *dst);
-bool emulate_specialmonitors_line(struct vidbuffer *src, struct vidbuffer *dst, int line);
-void specialmonitor_store_fmode(int vpos, int hpos, uae_u16 fmode);
 void specialmonitor_reset(void);
+void specialmonitor_update_genlock(void);
 bool specialmonitor_need_genlock(void);
 bool specialmonitor_uses_control_lines(void);
 bool specialmonitor_autoconfig_init(struct autoconfig_info*);
@@ -15,14 +14,11 @@ bool emulate_grayscale(struct vidbuffer*, struct vidbuffer*);
 bool specialmonitor_linebased(void);
 void genlock_infotext(uae_u8*, struct vidbuffer*);
 
-#ifdef __LIBRETRO__
+void specialmonitor_store_fmode(int vpos, int hpos, uae_u16 fmode);
+void specialmonitor_data(uae_u16, int);
+
 extern const TCHAR *specialmonitorfriendlynames[];
 extern const TCHAR *specialmonitormanufacturernames[];
 extern const TCHAR *specialmonitorconfignames[];
-#else
-const TCHAR *specialmonitorfriendlynames[];
-const TCHAR *specialmonitormanufacturernames[];
-const TCHAR *specialmonitorconfignames[];
-#endif
 
 #endif /* UAE_SPECIALMONITORS_H */
