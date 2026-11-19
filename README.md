@@ -2,7 +2,7 @@
 
 Based on WinUAE 6.1.0 (beta 23), [tonioni/WinUAE](https://github.com/tonioni/WinUAE) commit `4348e045`, on top of [libretro-uae](https://github.com/libretro/libretro-uae) commit `d366f77`.
 
-The previous release was based on WinUAE 5.3.1, git commit `51b7be351f359dc97f967f051da390283bc4b409`.
+The official release is based on WinUAE 5.3.1, git commit `51b7be351f359dc97f967f051da390283bc4b409`.
 
 ## WinUAE 6.1 port
 
