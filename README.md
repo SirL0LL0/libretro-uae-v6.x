@@ -1,6 +1,31 @@
 # PUAE LIBRETRO
 
-Based on WinUAE 5.3.1, git commit `51b7be351f359dc97f967f051da390283bc4b409`
+Based on WinUAE 6.1.0 (beta 23), [tonioni/WinUAE](https://github.com/tonioni/WinUAE) commit `0c966fd9`, on top of [libretro-uae](https://github.com/libretro/libretro-uae) commit `d366f77`.
+
+The previous release was based on WinUAE 5.3.1, git commit `51b7be351f359dc97f967f051da390283bc4b409`.
+
+## WinUAE 6.1 port
+
+The emulator side (`sources/src`) has been replaced with WinUAE 6.1 and the libretro frontend adapted to it.
+
+### Emulation
+
+- WinUAE 6.1 chipset, CPU, blitter and device emulation
+- New Denise renderer: Denise draws straight into the host buffer during emulation (the `linetoscr_*.cpp` files are WinUAE's generated line renderers). The core keeps a private 32-bit raster and the frontend cuts its window out of it, so crop and centering behave as before.
+- Keyboard microcontroller emulation (6570-036, 68HC05, D8039HLC), see [Keyboard](#keyboard)
+- Accelerator boards, see [Accelerator boards](#accelerator-boards)
+- WinUAE's C++ constructs converted to C (atomics, `alignas`, `cfgfile_mount`, `<cstdint>`, overloads); the keyboard MCU cores are converted by a script and checked against the C++ originals
+
+### Fixes found during the port
+
+- Save state restore crashed on the first `retro_unserialize` (RGA pipeline refresh slot without a pointer, also upstream)
+- Mismatched function signatures between files (heap corruption when saving states, crash on Windows)
+- Accelerator board ROMs read as empty from in-memory files (Blizzard 1230 III without RAM; also ACA500, CyberStorm MK3, SCSI kits)
+- Use-after-free in the A3000/A4000T SCSI controller on shutdown
+- Uninitialized buffer copied in `target_cfgfile_load()` (overflow when restarting)
+- Windows builds added the UAE boot ROM and filesystem board to every model; on CDTV/CDTV-CR that skipped the DMAC autoconfig and the machine stayed on a black screen
+- 8048 keyboard MCU read past the ROM at PC `0x7FF`; illegal 68HC05 opcodes called a NULL handler
+- Automatic crop jumping when sprites touched the display window edge (Pinball Illusions)
 
 ## Default controls
 
@@ -52,6 +77,7 @@ The following model presets are provided:
 
 | Short   | Long           | Kickstart | Chipset | Memory                          |
 |---------|----------------|-----------|---------|---------------------------------|
+| A1000   | Amiga 1000     | v1.3      | OCS     | 0.5MB Chip RAM                  |
 | A500OG  | Amiga 500      | v1.3      | OCS     | 0.5MB Chip RAM                  |
 | A500    | Amiga 500      | v1.3      | OCS     | 0.5MB Chip RAM + 0.5MB Slow RAM |
 | A500ECS | Amiga 500      | v1.3      | ECS     | 1MB Chip RAM                    |
@@ -62,9 +88,13 @@ The following model presets are provided:
 | A1200   | Amiga 1200     | v3.1      | AGA     | 2MB Chip RAM + 8MB Fast RAM     |
 | A2000OG | Amiga 2000     | v1.3      | OCS     | 0.5MB Chip RAM + 0.5MB Slow RAM |
 | A2000   | Amiga 2000     | v3.1      | ECS     | 1MB Chip RAM                    |
+| A3000   | Amiga 3000     | v3.1      | ECS     | 2MB Chip RAM + 8MB Fast RAM     |
 | A4030   | Amiga 4000/030 | v3.1      | AGA     | 2MB Chip RAM + 8MB Fast RAM     |
 | A4040   | Amiga 4000/040 | v3.1      | AGA     | 2MB Chip RAM + 8MB Fast RAM     |
+| A4060   | Amiga 4000/060 | v3.1      | AGA     | 2MB Chip RAM + 8MB Fast RAM     |
+| A4000T  | Amiga 4000T    | v3.1      | AGA     | 2MB Chip RAM + 8MB Fast RAM     |
 | CDTV    | Amiga CDTV     | v1.3+ext  | ECS     | 1MB Chip RAM                    |
+| CDTVCR  | Amiga CDTV-CR  | v2.05+ext | ECS     | 1MB Chip RAM                    |
 | CD32    | Amiga CD32     | v3.1+ext  | AGA     | 2MB Chip RAM                    |
 | CD32FR  | Amiga CD32     | v3.1+ext  | AGA     | 2MB Chip RAM + 8MB Fast RAM     |
 
@@ -94,6 +124,13 @@ The core has a somewhat compatible built-in AROS Kickstart, which is used as a f
 | A4000      | KS v3.0 rev 39.106            | **kick39106.A4000**    | **amiga-os-300-a4000.rom**    |   524 288 | 9b8bdd5a3fd32c2a5a6f5b1aefc799a5 |
 | A4000      | KS v3.1 rev 40.068            | **kick40068.A4000**    | **amiga-os-310-a4000.rom**    |   524 288 | 9bdedde6a4f33555b4a270c8ca53297d |
 | CDTV       | CDTV extended ROM v1.0        | **kick34005.CDTV**     | **amiga-os-130-cdtv-ext.rom** |   262 144 | 89da1838a24460e4b93f4f0c5d92d48d |
+| A3000      | KS v3.1 rev 40.068            | **kick40068.A3000**    | **amiga-os-310-a3000.rom**    |   524 288 | 413590e50098a056cfec418d3df0212d |
+| A4000T     | KS v3.1 rev 40.070            | **kick40070.A4000T**   | **amiga-os-310-a4000t.rom**   |   524 288 | e873c43040b4d7a9c65f37cf2da2158f |
+| CDTV-CR    | CDTV-CR extended ROM v3.44    | **kick40001.CDTVCR**   | **amiga-os-cdtv-cr-ext.rom**  |   262 144 | 58454dffbabef6b7666876c1e6870a60 |
+
+The A1000 preset boots Kickstart 1.3 from ROM (not the bootstrap with a Kickstart disk). CDTV-CR uses the A600 Kickstart 2.05 (`kick37350.A600`) with its extended ROM.
+
+ROMs are also found **by content**: when a file with the standard name is missing, every file from 2KB to 1MB in `system` and `system/uae` (one subdirectory deep) is identified with WinUAE's ROM database, whatever its name. The same scan provides the ROMs of accelerator boards and keyboard microcontrollers. ROMs split in two chips (`_even/_odd` or `_hi/_lo`) must be merged first.
 
 CD32 requires either separate ROMs (Kickstart + extended ROM) or the combined ROM:
 
@@ -147,6 +184,86 @@ It delivers the best of both worlds, and looks great with high resolution games,
 - Automatic "Resolution" defaults to "**Hires**" and selects "**SuperHires**" when needed (practically only in Workbench and Super Skidmarks)
 - Automatic "Line Mode" defaults to "**Single Line**" and selects "**Double Line**" on interlaced screens
 
+## Core options
+
+The core options are grouped in 12 categories, in menu order: **Machine** (model and presets, Kickstart, chipset, video standard, clock), **CPU**, **Memory**, **Expansions** (accelerator boards, cartridges, keyboard), **Chipset** (accuracy), **Media** (floppy, hard drive, WHDLoad, CD), **Video**, **Audio**, **Input**, **Hotkey Mapping**, **RetroPad Mapping**, **On-Screen Display**. The option keys (`puae_...`) did not change, so saved configurations keep working.
+
+New options from WinUAE 6:
+
+| Option | Values | Notes |
+|--------|--------|-------|
+| Chipset > Display Optimizations | **Full**, Partial, None | Shortcuts of the new Denise renderer |
+| Machine > Chipset | **Automatic**, OCS, ECS Agnus, ECS Denise, Full ECS, AGA | Overrides the chipset of the model |
+| Machine > Real-Time Clock | **Automatic**, None, MSM6242B, RP5C01A, MSM6242B (A2000) | |
+| CPU > 68030 Data Cache | **disabled**, enabled | |
+| Expansions > Keyboard Type | **UAE**, Automatic, A500/A600/A1000/A2000-A4000, A1200, A2000 | Keyboard microcontroller, see [Keyboard](#keyboard) |
+| Expansions > Keyboard Rollover | **N-key**, Original | Original emulates the matrix ghosting |
+| Media > Hard Drive Write Protection | **disabled**, enabled | Mounts all images and directories read-only |
+| Video > Interlaced Line Mode | **Double, fields**, Double, frames, Double, fields+ | Line doubling of interlaced screens |
+| Video > Progressive Line Mode | **Double**, Scanlines, Double, fields, Double, fields+ | Line doubling of progressive screens |
+| Video > Filtered Low Resolution | **disabled**, enabled | Blends pixels when the screen has a higher resolution than the output |
+| Audio > Stereo Delay | **disabled**, 1-10 | Only with stereo separation below 100% |
+| Audio > Swap Stereo Channels | **disabled**, enabled | |
+
+### Reset
+
+A hard reset (RetroArch `Restart`) restarts the whole emulation with the current options, the same as loading the core again. Model, accelerator board, memory and chipset changes therefore only need a reset, no core reload.
+
+### CPU speed
+
+`CPU > CPU Speed` has a new value, **Max**: the CPU runs as fast as the PC allows, using 75% of each frame and leaving the rest to RetroArch for video and audio. The result depends on the PC. As an example, an A1200 with a Blizzard 1260 reaches about 120 000-150 000 Dhrystone in xsysinfo, about 140 times an A600.
+
+`CPU Speed` only works with `CPU Compatibility` set to **Normal** or **More compatible**; with Cycle-exact the core shows a warning and ignores it.
+
+## Accelerator boards
+
+`Expansions > Accelerator Board` and `Expansions > Accelerator Memory` (Automatic = 32MB, limited to the board maximum). Core restart required.
+
+| Board | Model | CPU |
+|-------|-------|-----|
+| GVP A530 | A500 | 68030 |
+| M-Tec E-Matrix 530 | A500 (KS 2.0+) | 68030 |
+| Hardital TQM | A500 | 68030 |
+| Kupke Golem 030 | A500 | 68030 |
+| DCE Typhoon MK2 | A500 (KS 2.0+) | 68030 |
+| Apollo 630 | A600 | 68040 |
+| Blizzard 1230 I/II, III, IV | A1200 | 68030 |
+| Blizzard 1240/1260 | A1200 | 68040/68060 |
+| GVP A1230 Turbo+ / Series II | A1200 | 68030 |
+| Apollo 1240/1260 | A1200 | 68040/68060 |
+| DKB 1230/1240/Cobra | A1200 | 68030 |
+| CSA Magnum 40 | A2000 | 68040 |
+| GVP G-Force 030 | A2000 | 68030 |
+| GVP G-Force 040 | A2000 | 68040/68060 |
+| GVP A3001 Series I | A2000 | 68030 |
+| Commodore A2620/A2630 | A2000 | 68020/68030 |
+| Blizzard 2060 | A2000 | 68040/68060 |
+| TekMagic 2040/2060 | A2000 | 68040/68060 |
+| PP&S Zeus 040 | A2000 | 68040/68060 |
+| CyberStorm MK I, MK II, MK III | A3000/A4000 | 68040/68060 |
+| MacroSystem Falcon 040 | A3000/A4000 | 68040/68060 |
+| MacroSystem Warp Engine | A4000 | 68040/68060 |
+| QuikPak 4060 | A4000 | 68060 |
+| DCE SX32 Pro | CD32 | 68030 |
+
+- Most boards need their ROM, found by content in `system` or `system/uae`. Without it the board is disabled with a message.
+- The board sets the CPU; on 68040/68060 boards `CPU Model` chooses between the two.
+- E-Matrix 530 and Typhoon MK2 keep resetting with Kickstart 1.x; the core warns about it.
+- As in WinUAE, Hardital TQM and Falcon 040 have no RAM, and the RAM of A2630 and Zeus 040 is not seen.
+- Board RAM is included in save states.
+
+## Keyboard
+
+`Expansions > Keyboard Type` selects the emulation of the keyboard microcontroller (timing, rollover, ghosting). It needs the dump of the MCU ROM in `system` (or `system/uae`), found by CRC32 whatever its name:
+
+| Keyboard | MCU | Size | CRC32 |
+|----------|-----|-----:|-------|
+| A500, A600, A1000, A2000-A4000 | 6570-036 | 2KB | `4a3fc332` |
+| A1200 | 68HC05 | 8KB | `2a77eec4` |
+| A2000 | D8039HLC | 2KB | `c23d280e` or `fb92a773` |
+
+Without the ROM the default UAE keyboard is used and a message is shown. "Automatic" picks the keyboard of the model (CD32 and CDTV keep the UAE keyboard). Core restart required.
+
 ## Model overriding
 
 You can force a specific model if a game needs one (AGA games for instance) either by the "Model" core option or by file path tags.
@@ -167,6 +284,11 @@ The whole path (filename and directory) will be searched for the following tags 
 | **x**  | **x**  |       | **(A1200)**, **AGA**, **CD32**, **AmigaCD** | Amiga 1200 (2MB Chip RAM + 8MB Fast RAM)     |
 | **x**  | **x**  |       | **(A4030)**, **(030)**                      | Amiga 4000/030 (2MB Chip RAM + 8MB Fast RAM) |
 | **x**  | **x**  |       | **(A4040)**, **(040)**                      | Amiga 4000/040 (2MB Chip RAM + 8MB Fast RAM) |
+| **x**  |        |       | **(A1000)**                                 | Amiga 1000 (0.5MB Chip RAM)                  |
+| **x**  | **x**  |       | **(A3000)**                                 | Amiga 3000 (2MB Chip RAM + 8MB Fast RAM)     |
+| **x**  | **x**  |       | **(A4060)**, **(060)**                      | Amiga 4000/060 (2MB Chip RAM + 8MB Fast RAM) |
+| **x**  | **x**  |       | **(A4000T)**                                | Amiga 4000T (2MB Chip RAM + 8MB Fast RAM)    |
+|        |        | **x** | **CDTV-CR**                                 | Amiga CDTV-CR (1MB Chip RAM)                 |
 |        |        | **x** | **CDTV**                                    | Amiga CDTV (1MB Chip RAM)                    |
 |        |        | **x** | **(CD32)**, **(CD32NF)**                    | Amiga CD32 (2MB Chip RAM)                    |
 |        |        | **x** | **(CD32FR)**, **FastRAM**                   | Amiga CD32 (2MB Chip RAM + 8MB Fast RAM)     |
@@ -468,6 +590,14 @@ If you are using RDB HDF files, please use `0,0,0,512` instead of geometry numbe
 
 ## Latest features
 
+- WinUAE 6.1 emulator core
+- New models: A1000, A3000, A4000/060, A4000T, CDTV-CR
+- Accelerator boards for A500, A600, A1200, A2000, A3000, A4000 and CD32
+- Keyboard microcontroller emulation
+- ROM detection by content
+- CPU Speed "Max"
+- Core options grouped in 12 categories
+- Model and hardware changes applied with a reset
 - Lightgun/pen (sonninnos)
 - Floppy write redirect (sonninnos)
 - Large HDF support (sonninnos)
