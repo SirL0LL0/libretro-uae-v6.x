@@ -27,6 +27,22 @@ The emulator side (`sources/src`) has been replaced with WinUAE 6.1 and the libr
 - 8048 keyboard MCU read past the ROM at PC `0x7FF`; illegal 68HC05 opcodes called a NULL handler
 - Automatic crop jumping when sprites touched the display window edge (Pinball Illusions)
 
+### Hardware test suite (amitorture)
+
+The core passes [amitorture](https://github.com/solskogen/amitorture) (commit `af2c0e9`), a bare-metal test suite that checks CPU, chipset, CIA, blitter, copper, Paula and expansion hardware against real Amiga behaviour and shows its results on the Amiga display.
+
+| Disk | Model | Pass | Fail | Skip | Untestable |
+|---|---|---|---|---|---|
+| 1 core | A1200 | 922 | 0 | 48 | 31 |
+| 2 cpu | A1200 | 82 | 0 | 5 | 0 |
+| benchmarks | A500 | integer score 1.00 (A500 = 1.00) | | | |
+| benchmarks | A1200 + 8 MB fast | integer score 7.23 | | | |
+
+- Disk 1 needs `Chipset > Collision Level` = `Full` (with the default `Sprites and Playfields`, bitplane-to-bitplane collisions are not emulated) and `Video > Resolution` = `Super-High` (AGA 1/4 pixel scrolling is only visible at superhires output width). Both behave as in WinUAE.
+- Disk 3 (expansion) fails only the 5 MSM6242B real-time clock cases: as in WinUAE, the clock reads the host time and ignores writes, HOLD, STOP and BUSY.
+- "Untestable" cases need amitorture's host runner (screenshots, key and mouse injection), which is not available in RetroArch.
+- The disks wait up to 10 minutes for that runner after boot. To run them in RetroArch, re-bake them without the mailbox: `python3 tools/mkadf.py --in amitorture-1-core.adf -o out.adf --param flags=nombox`.
+
 ## Default controls
 
 | RetroPad button | Action                        |
