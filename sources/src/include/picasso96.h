@@ -684,10 +684,11 @@ extern uae_u16 p96_yuvtorgb(uae_u8 y, uae_u8 u, uae_u8 v);
 
 #endif /* PICASSO96 */
 
-/* libretro keeps its own host side RTG code in picasso96.c */
+/* libretro: host side RTG code in retrodep/picasso96_retro.c and rtg.c,
+ * from WinUAE od-unix; same interface (retrodep/picasso96_unix.h) */
 #if defined(WIN32) && !defined(__LIBRETRO__)
 #include "picasso96_win.h"
-#elif defined(UAE_TARGET_UNIX)
+#elif defined(UAE_TARGET_UNIX) || (defined(__LIBRETRO__) && defined(PICASSO96))
 #include "picasso96_unix.h"
 #endif
 

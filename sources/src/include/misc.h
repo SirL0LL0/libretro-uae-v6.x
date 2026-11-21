@@ -120,6 +120,16 @@ extern struct AmigaMonitor *amon;
 extern struct AmigaMonitor AMonitors[MAX_AMIGAMONITORS];
 
 #ifdef PICASSO96
+/* WinUAE: od-generic/display_modes.h */
+#ifndef UAE_DISPLAY_MODES_H
+struct ScreenResolution {
+	uae_u32 width;  /* in pixels */
+	uae_u32 height; /* in pixels */
+};
+#endif
+#ifndef MAX_PICASSO_MODES
+#define MAX_PICASSO_MODES 300
+#endif
 struct PicassoResolution
 {
 	struct ScreenResolution res;

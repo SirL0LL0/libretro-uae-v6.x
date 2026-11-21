@@ -131,7 +131,11 @@ SOURCES_C += \
 	$(EMU)/newcpu.c \
 	$(EMU)/newcpu_common.c \
 	$(EMU)/pci.c \
-	$(EMU)/picasso96.c \
+	$(EMU)/framebufferboards.c \
+	$(EMU)/qemuvga/cirrus_vga.c \
+	$(EMU)/qemuvga/qemuuaeglue.c \
+	$(EMU)/qemuvga/vga.c \
+	$(EMU)/rtg_convert.c \
 	$(EMU)/readcpu.c \
 	$(EMU)/rommgr.c \
 	$(EMU)/rtc.c \
@@ -160,6 +164,75 @@ SOURCES_C += \
 	$(EMU)/softfloat/softfloat_decimal.c \
 	$(EMU)/softfloat/softfloat_fpsp.c
 
+# Graphics board chips (gfxboard.c) from 86Box, as in WinUAE 6.1. They are
+# built with their own include paths (Makefile: INC86BOX), which would clash
+# with UAE's headers (x86.h, cpu.h) if they were global.
+SOURCES_86BOX = \
+	$(EMU)/86box/libretro_86box.c \
+	$(EMU)/86box/timer.c \
+	$(EMU)/86box/device/i2c.c \
+	$(EMU)/86box/device/i2c_gpio.c \
+	$(EMU)/86box/mem/i2c_eeprom.c \
+	$(EMU)/86box/mem/nmc93cxx.c \
+	$(EMU)/86box/utils/fifo.c \
+	$(EMU)/86box/video/vid_cl54xx.c \
+	$(EMU)/86box/video/vid_ddc.c \
+	$(EMU)/86box/video/vid_et4000.c \
+	$(EMU)/86box/video/vid_et4000w32.c \
+	$(EMU)/86box/video/vid_mga.c \
+	$(EMU)/86box/video/vid_s3.c \
+	$(EMU)/86box/video/vid_s3_virge.c \
+	$(EMU)/86box/video/vid_svga.c \
+	$(EMU)/86box/video/vid_svga_render.c \
+	$(EMU)/86box/video/vid_voodoo.c \
+	$(EMU)/86box/video/vid_voodoo_banshee.c \
+	$(EMU)/86box/video/vid_voodoo_banshee_blitter.c \
+	$(EMU)/86box/video/vid_voodoo_blitter.c \
+	$(EMU)/86box/video/vid_voodoo_display.c \
+	$(EMU)/86box/video/vid_voodoo_fb.c \
+	$(EMU)/86box/video/vid_voodoo_fifo.c \
+	$(EMU)/86box/video/vid_voodoo_reg.c \
+	$(EMU)/86box/video/vid_voodoo_render.c \
+	$(EMU)/86box/video/vid_voodoo_setup.c \
+	$(EMU)/86box/video/vid_voodoo_texture.c \
+	$(EMU)/86box/video/clockgen/vid_clockgen_av9194.c \
+	$(EMU)/86box/video/clockgen/vid_clockgen_ch9204.c \
+	$(EMU)/86box/video/clockgen/vid_clockgen_icd2061.c \
+	$(EMU)/86box/video/clockgen/vid_clockgen_ics2494.c \
+	$(EMU)/86box/video/ramdac/vid_ramdac_att20c49x.c \
+	$(EMU)/86box/video/ramdac/vid_ramdac_att2xc498.c \
+	$(EMU)/86box/video/ramdac/vid_ramdac_bt48x.c \
+	$(EMU)/86box/video/ramdac/vid_ramdac_ibm_rgb528.c \
+	$(EMU)/86box/video/ramdac/vid_ramdac_mu9c1880.c \
+	$(EMU)/86box/video/ramdac/vid_ramdac_sc1148x.c \
+	$(EMU)/86box/video/ramdac/vid_ramdac_sc1502x.c \
+	$(EMU)/86box/video/ramdac/vid_ramdac_sdac.c \
+	$(EMU)/86box/video/ramdac/vid_ramdac_stg1702.c \
+	$(EMU)/86box/video/ramdac/vid_ramdac_tvp3026.c \
+	$(EMU)/86box/winuae/86box_video.c \
+	$(EMU)/86box/winuae/vid_inmos.c \
+	$(EMU)/86box/winuae/vid_ncr.c \
+	$(EMU)/86box/winuae/vid_permedia2.c \
+	$(EMU)/86box/winuae/vid_ramdac_bt482.c
+
+INC86BOX = \
+	-include stdbool.h -DUAE \
+	-I$(EMU)/86box/winuae \
+	-I$(EMU)/86box/winuae/include \
+	-I$(EMU)/86box/include \
+	-I$(EMU)/86box/cpu \
+	-I$(EMU)/86box/cpu/softfloat3e \
+	-I$(EMU)/86box/codegen \
+	-I$(EMU)/86box
+
+INC86BOX_GLUE = \
+	-include stdbool.h -DUAE \
+	-I$(EMU)/86box/winuae \
+	-I$(EMU)/86box/winuae/include \
+	-I$(EMU)/86box/include
+
+SOURCES_C += $(SOURCES_86BOX)
+
 #SOURCES_C += \
 #	$(EMU)/jit/compemu.c \
 #	$(EMU)/jit/compemu_fpp.c \
@@ -173,6 +246,8 @@ SOURCES_C += \
 	$(RETRODEP)/main.c \
 	$(RETRODEP)/mman.c \
 	$(RETRODEP)/parser.c \
+	$(RETRODEP)/picasso96_retro.c \
+	$(RETRODEP)/rtg.c \
 	$(RETRODEP)/serial_host.c \
 	$(RETRODEP)/machdep/support.c \
 	$(RETRODEP)/sounddep/sound.c \

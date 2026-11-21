@@ -21,10 +21,11 @@
 #include "framebufferboards.h"
 #include "xwin.h"
 
+struct fb_struct;
 typedef uae_u32(REGPARAM3 *fb_get_func)(struct fb_struct *, uaecptr) REGPARAM;
 typedef void (REGPARAM3 *fb_put_func)(struct fb_struct *, uaecptr, uae_u32) REGPARAM;
 
-extern addrbank generic_fb_bank;
+static addrbank generic_fb_bank;
 
 struct fb_struct
 {
@@ -709,7 +710,7 @@ static uae_u32 REGPARAM2 fb_lget(uaecptr addr)
 	return v;
 }
 
-static addrbank generic_fb_bank
+static addrbank generic_fb_bank =
 {
 	fb_lget, fb_wget, fb_bget,
 	fb_lput, fb_wput, fb_bput,
@@ -718,7 +719,7 @@ static addrbank generic_fb_bank
 	ABFLAG_IO, S_READ, S_WRITE
 };
 
-struct gfxboard_func harlequin_func
+struct gfxboard_func harlequin_func =
 {
 	harlequin_init,
 	harlequin_free,
@@ -730,7 +731,7 @@ struct gfxboard_func harlequin_func
 	harlequin_configured
 };
 
-struct gfxboard_func rainbowii_func
+struct gfxboard_func rainbowii_func =
 {
 	rainbow2_init,
 	rainbow2_free,

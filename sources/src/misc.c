@@ -1005,7 +1005,7 @@ int target_checkcapslock(int scancode, int *state) { return 0; }
 void setmaintitle() {}
 #endif
 
-#if defined PICASSO96
+#if defined PICASSO96 && !defined(__LIBRETRO__) /* libretro: one display, no host mode list */
 ///////////////////////////////////////////////////
 // win32gfx.cpp
 ///////////////////////////////////////////////////

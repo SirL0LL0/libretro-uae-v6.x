@@ -14,6 +14,7 @@ The emulator side (`sources/src`) has been replaced with WinUAE 6.1 and the libr
 - New Denise renderer: Denise draws straight into the host buffer during emulation (the `linetoscr_*.cpp` files are WinUAE's generated line renderers). The core keeps a private 32-bit raster and the frontend cuts its window out of it, so crop and centering behave as before.
 - Keyboard microcontroller emulation (6570-036, 68HC05, D8039HLC), see [Keyboard](#keyboard)
 - Accelerator boards, see [Accelerator boards](#accelerator-boards)
+- Graphics cards: Picasso96 `uaegfx` and real Zorro boards, see [Graphics cards](#graphics-cards)
 - WinUAE's C++ constructs converted to C (atomics, `alignas`, `cfgfile_mount`, `<cstdint>`, overloads); the keyboard MCU cores are converted by a script and checked against the C++ originals
 
 ### Fixes found during the port
@@ -202,7 +203,7 @@ It delivers the best of both worlds, and looks great with high resolution games,
 
 ## Core options
 
-The core options are grouped in 12 categories, in menu order: **Machine** (model and presets, Kickstart, chipset, video standard, clock), **CPU**, **Memory**, **Expansions** (accelerator boards, cartridges, keyboard), **Chipset** (accuracy), **Media** (floppy, hard drive, WHDLoad, CD), **Video**, **Audio**, **Input**, **Hotkey Mapping**, **RetroPad Mapping**, **On-Screen Display**. The option keys (`puae_...`) did not change, so saved configurations keep working.
+The core options are grouped in 14 categories, in menu order: **Machine** (model and presets, Kickstart, chipset, video standard, clock), **CPU**, **Memory**, **Expansions** (accelerator boards, cartridges, keyboard), **Graphics Card**, **CD32 FMV**, **Chipset** (accuracy), **Media** (floppy, hard drive, WHDLoad, CD), **Video**, **Audio**, **Input**, **Hotkey Mapping**, **RetroPad Mapping**, **On-Screen Display**. The option keys (`puae_...`) did not change, so saved configurations keep working.
 
 New options from WinUAE 6:
 
@@ -212,6 +213,10 @@ New options from WinUAE 6:
 | Machine > Chipset | **Automatic**, OCS, ECS Agnus, ECS Denise, Full ECS, AGA | Overrides the chipset of the model |
 | Machine > Real-Time Clock | **Automatic**, None, MSM6242B, RP5C01A, MSM6242B (A2000) | |
 | CPU > 68030 Data Cache | **disabled**, enabled | |
+| Expansions > Cartridge | **disabled**, HRTMon (built-in), freezer ROMs found | Only freezer cartridges (Action Replay, Nordic Power, X-Power, Super IV, Pro Access), recognized by content |
+| Graphics Card > Board | **disabled**, UAE Zorro III/II, Zorro boards | See [Graphics cards](#graphics-cards) |
+| Graphics Card > VRAM | **Automatic**, 1-256 MB | |
+| CD32 FMV > Cartridge | **disabled**, Automatic, FMV ROMs found | CD32 Full Motion Video cartridge (Video CD), ROM recognized by content |
 | Expansions > Keyboard Type | **UAE**, Automatic, A500/A600/A1000/A2000-A4000, A1200, A2000 | Keyboard microcontroller, see [Keyboard](#keyboard) |
 | Expansions > Keyboard Rollover | **N-key**, Original | Original emulates the matrix ghosting |
 | Media > Hard Drive Write Protection | **disabled**, enabled | Mounts all images and directories read-only |
@@ -267,6 +272,17 @@ A hard reset (RetroArch `Restart`) restarts the whole emulation with the current
 - E-Matrix 530 and Typhoon MK2 keep resetting with Kickstart 1.x; the core warns about it.
 - As in WinUAE, Hardital TQM and Falcon 040 have no RAM, and the RAM of A2630 and Zeus 040 is not seen.
 - Board RAM is included in save states.
+
+## Graphics cards
+
+`Graphics Card > Board` and `Graphics Card > VRAM`. Core restart required. While the Amiga shows the graphics card screen, the core outputs it at its own resolution (up to 1920x1200) instead of the chipset picture, and switches back when the Amiga does.
+
+- **UAE Zorro III / Zorro II** is the Picasso96 `uaegfx` board (WinUAE's Unix port, `retrodep/rtg.c`): the fastest, the driver talks to the emulator directly. Zorro III needs a 32-bit CPU (68020 with 32-bit addressing, 68030 or higher), not the A1200's 68EC020.
+- **Real boards** emulate the board and its chip, as in WinUAE 6.1 (86Box video chips): Picasso II/II+/IV, CyberVision 64 and 64/3D, Piccolo, Piccolo SD64, Spectrum 28/24, Retina Z3, Rainbow III, Merlin, Graffity, Visiona, Domino, oMniBus. Picasso IV needs its ROM, found by content. PCI boards are built but not in the menu (they need a PCI bridge in a `.uae` configuration); the A2410 is not available (no TMS34010 emulation).
+- Zorro II boards need free Zorro II space: with 8 MB of Z2 Fast RAM (A4000 preset) there is none, use Z3 Fast RAM instead.
+- All need Picasso96 (or P96) installed in the Amiga with the board's driver.
+
+Tested with Picasso96 2.0 on Workbench 3.1 (A4000/040): the Workbench opens on the board at 640x480 with `uaegfx` and with every board above except oMniBus ET4000W32. The amitorture `rtg` module (register level: VRAM, VGA/DAC registers, a 640x480 mode, the 2D engine) passes on the Cirrus, S3 Trio64 and ET4000W32 (Merlin) boards; the Tseng ET4000 boards fail one case (vertical interrupt status) and the oMniBus ET4000W32 one (DAC pixel mask), both in the shared 86Box chip code.
 
 ## Keyboard
 

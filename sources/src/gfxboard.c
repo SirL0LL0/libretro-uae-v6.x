@@ -129,6 +129,7 @@ struct gfxboard
 
 static const struct gfxboard boards[] =
 {
+#ifndef __LIBRETRO__ /* libretro: no TMS34010 emulation (mame/) yet */
 	{
 		GFXBOARD_ID_A2410,
 		_T("A2410 [Zorro II]"), _T("Commodore"), _T("A2410"),
@@ -136,6 +137,7 @@ static const struct gfxboard boards[] =
 		0x00000000, 0x00100000, 0x00100000, 0x10000, 0, 2, 2, false, false,
 		0, 0xc1, &a2410_func
 	},
+#endif
 	{
 		GFXBOARD_ID_SPECTRUM_Z2,
 		_T("Spectrum 28/24 [Zorro II]"), _T("Great Valley Products"), _T("Spectrum28/24_Z2"),
@@ -425,7 +427,7 @@ static const struct gfxboard boards[] =
 		ROMTYPE_x86_VGA
 	},
 	{
-		NULL
+		0
 	}
 };
 
@@ -557,7 +559,7 @@ struct rtggfxboard
 };
 
 static struct rtggfxboard rtggfxboards[MAX_RTG_BOARDS];
-static_assert(GFXCHIP_MAX_BOARDS >= MAX_RTG_BOARDS, "86Box chip glue for each RTG board");
+_Static_assert(GFXCHIP_MAX_BOARDS >= MAX_RTG_BOARDS, "86Box chip glue for each RTG board");
 static struct rtggfxboard *only_gfx_board;
 static int rtg_visible[MAX_AMIGADISPLAYS];
 static int rtg_initial[MAX_AMIGADISPLAYS];
@@ -2259,7 +2261,7 @@ STATIC_INLINE uaecptr fixaddr (struct rtggfxboard *gb, uaecptr addr, int mask)
 	return addr;
 }
 
-STATIC_INLINE uaecptr fixaddr (struct rtggfxboard *gb, uaecptr addr)
+STATIC_INLINE uaecptr fixaddr2 (struct rtggfxboard *gb, uaecptr addr)
 {
 	if (gb->vram_offset_enabled) {
 		if (addr & 0x8000) {
@@ -2478,7 +2480,7 @@ static void gfxboard_bput_vram (struct rtggfxboard *gb, uaecptr addr, uae_u8 b, 
 }
 
 static struct rtggfxboard *lastgetgfxboard;
-static rtggfxboard *getgfxboard(uaecptr addr)
+static struct rtggfxboard *getgfxboard(uaecptr addr)
 {
 #ifdef JIT
 	special_mem = S_WRITE | S_READ;
@@ -2758,7 +2760,7 @@ static uae_u32 REGPARAM2 gfxboard_lget_mem_nojit (uaecptr addr)
 {
 	struct rtggfxboard *gb = getgfxboard(addr);
 	addr -= gb->gfxboardmem_start & gb->gfxmem_bank->mask;
-	addr = fixaddr (gb, addr);
+	addr = fixaddr2(gb, addr);
 	if (addr == -1)
 		return 0;
 	return gfxboard_lget_vram (gb, addr, 0);
@@ -2767,7 +2769,7 @@ static uae_u32 REGPARAM2 gfxboard_wget_mem_nojit (uaecptr addr)
 {
 	struct rtggfxboard *gb = getgfxboard(addr);
 	addr -= gb->gfxboardmem_start & gb->gfxmem_bank->mask;
-	addr = fixaddr (gb, addr);
+	addr = fixaddr2(gb, addr);
 	if (addr == -1)
 		return 0;
 	return gfxboard_wget_vram (gb, addr, 0);
@@ -2776,7 +2778,7 @@ static uae_u32 REGPARAM2 gfxboard_bget_mem_nojit (uaecptr addr)
 {
 	struct rtggfxboard *gb = getgfxboard(addr);
 	addr -= gb->gfxboardmem_start & gb->gfxmem_bank->mask;
-	addr = fixaddr (gb, addr);
+	addr = fixaddr2(gb, addr);
 	if (addr == -1)
 		return 0;
 	return gfxboard_bget_vram (gb, addr, 0);
@@ -2785,7 +2787,7 @@ static void REGPARAM2 gfxboard_lput_mem_nojit (uaecptr addr, uae_u32 l)
 {
 	struct rtggfxboard *gb = getgfxboard(addr);
 	addr -= gb->gfxboardmem_start & gb->gfxmem_bank->mask;
-	addr = fixaddr (gb, addr);
+	addr = fixaddr2(gb, addr);
 	if (addr == -1)
 		return;
 	gfxboard_lput_vram (gb, addr, l, 0);
@@ -2794,7 +2796,7 @@ static void REGPARAM2 gfxboard_wput_mem_nojit (uaecptr addr, uae_u32 w)
 {
 	struct rtggfxboard *gb = getgfxboard(addr);
 	addr -= gb->gfxboardmem_start & gb->gfxmem_bank->mask;
-	addr = fixaddr (gb, addr);
+	addr = fixaddr2(gb, addr);
 	if (addr == -1)
 		return;
 	gfxboard_wput_vram (gb, addr, w, 0);
@@ -2803,7 +2805,7 @@ static void REGPARAM2 gfxboard_bput_mem_nojit (uaecptr addr, uae_u32 b)
 {
 	struct rtggfxboard *gb = getgfxboard(addr);
 	addr -= gb->gfxboardmem_start & gb->gfxmem_bank->mask;
-	addr = fixaddr (gb, addr);
+	addr = fixaddr2(gb, addr);
 	if (addr == -1)
 		return;
 	gfxboard_bput_vram (gb, addr, b, 0);

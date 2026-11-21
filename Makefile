@@ -344,6 +344,17 @@ OBJECTS     := $(addprefix $(OBJDIR)/,$(OBJECTS))
 
 INCDIRS     := $(EXTRA_INCLUDES) $(INCFLAGS)
 
+# 86Box graphics chips: their own include paths first (Makefile.common). As
+# in WinUAE, the board chips get 86box_video_redirect.h (their memory, I/O,
+# timer and device calls go to the Amiga side, 86box_video.c) and the glue
+# file gets the short include list.
+$(OBJDIR)/$(EMU)/86box/%.o: INCDIRS := $(INC86BOX) $(INCDIRS)
+$(OBJDIR)/$(EMU)/86box/video/%.o \
+$(OBJDIR)/$(EMU)/86box/device/%.o \
+$(OBJDIR)/$(EMU)/86box/mem/%.o \
+$(OBJDIR)/$(EMU)/86box/winuae/vid_%.o: INCDIRS := -include 86box_video_redirect.h $(INC86BOX) $(INCDIRS)
+$(OBJDIR)/$(EMU)/86box/winuae/86box_video.o: INCDIRS := $(INC86BOX_GLUE) $(INCDIRS)
+
 default: info all
 
 info:

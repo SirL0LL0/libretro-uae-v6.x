@@ -50,8 +50,8 @@
 #define CPUEMU_40 /* generic 680x0 with JIT direct memory access */
 #define CPUEMU_50 /* generic 680x0 with indirect memory access */
 #define ACTION_REPLAY /* Action Replay 1/2/3 support */
-//#define PICASSO96 /* Picasso96 display card emulation */
-//#define UAEGFX_INTERNAL /* built-in libs:picasso96/uaegfx.card */
+#define PICASSO96 /* Picasso96 display card emulation (host side: retrodep/picasso96_retro.c, rtg.c) */
+#define UAEGFX_INTERNAL /* built-in libs:picasso96/uaegfx.card */
 //#define BSDSOCKET /* bsdsocket.library emulation */
 #define CAPS /* CAPS-image support */
 //#define SCP /* SuperCardPro */
@@ -80,7 +80,7 @@
 //#define WITH_PPC
 //#define WITH_QEMU_CPU
 //#define WITH_TOCCATA
-//#define WITH_PCI
+#define WITH_PCI /* PCI bridges (Prometheus, Mediator...) for the PCI graphics boards */
 //#define WITH_X86
 #define WITH_THREADED_CPU
 //#define WITH_SOFTFLOAT

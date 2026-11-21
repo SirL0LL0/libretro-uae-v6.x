@@ -40,7 +40,9 @@ int max_uae_width = 8192;
 int max_uae_height = 8192;
 int pause_emulation;
 bool gfx_hdr;
-addrbank *gfxmem_banks[MAX_RTG_BOARDS];
+#ifndef PICASSO96
+addrbank *gfxmem_banks[MAX_RTG_BOARDS]; /* else retrodep/rtg.c */
+#endif
 struct AmigaMonitor AMonitors[MAX_AMIGAMONITORS];
 static int display_change_requested;
 struct vidbuf_description *gfxvidinfo = &adisplays[0].gfxvidinfo;

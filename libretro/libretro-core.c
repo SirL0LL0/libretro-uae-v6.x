@@ -22,6 +22,7 @@
 #include "memory.h"
 #include "autoconf.h"
 #include "rommgr.h"
+#include "gfxboard.h"
 #include "sounddep/sound.h"
 
 #ifndef MAX_STOP
@@ -166,6 +167,8 @@ char info_path[RETRO_PATH_MAX] = {0};
 static char *uae_argv[] = { "puae" };
 static int restart_pending = 0;
 static struct puae_core_option_info puae_carts[RETRO_NUM_CORE_OPTION_VALUES_MAX] = {0};
+static struct puae_core_option_info puae_fmvs[RETRO_NUM_CORE_OPTION_VALUES_MAX] = {0};
+static char puae_picassoiv_rom[RETRO_PATH_MAX] = {0};
 static struct puae_core_option_info puae_kickstarts[RETRO_NUM_CORE_OPTION_VALUES_MAX] = {0};
 
 static long retro_now = 0;
@@ -778,12 +781,108 @@ static void free_puae_core_options(void)
       free(puae_carts[i].label);
       puae_carts[i].label = NULL;
 
+      free(puae_fmvs[i].value);
+      puae_fmvs[i].value = NULL;
+
+      free(puae_fmvs[i].label);
+      puae_fmvs[i].label = NULL;
+
       free(puae_kickstarts[i].value);
       puae_kickstarts[i].value = NULL;
 
       free(puae_kickstarts[i].label);
       puae_kickstarts[i].label = NULL;
    }
+}
+
+/* ROM type of a file, from WinUAE's ROM database (by contents, so file
+ * names don't matter); 0 when unknown */
+static uae_u32 puae_rom_type(const char *path)
+{
+   struct romdata *rd = NULL;
+   uae_u8 *buf;
+   long size;
+   FILE *f = fopen(path, "rb");
+
+   if (!f)
+      return 0;
+   fseek(f, 0, SEEK_END);
+   size = ftell(f);
+   fseek(f, 0, SEEK_SET);
+   /* Cartridges and board ROMs are 8 KB - 512 KB */
+   if (size >= 8192 && size <= 524288 && (buf = (uae_u8 *)malloc(size)))
+   {
+      if (fread(buf, 1, size, f) == (size_t)size)
+         rd = getromdatabydata(buf, (int)size);
+      free(buf);
+   }
+   fclose(f);
+   return rd ? rd->type : 0;
+}
+
+/* Add to an option the ROMs in the system data directory whose type is in
+ * the 'group' ROM type group */
+static void puae_scan_roms(struct retro_core_option_v2_definition *def, int *j,
+      struct puae_core_option_info *store, uae_u32 group)
+{
+   RDIR *dir;
+
+   if (!path_is_directory(retro_system_data_directory))
+      return;
+   if (!(dir = retro_opendir(retro_system_data_directory)))
+      return;
+
+   while (retro_readdir(dir) && *j < RETRO_NUM_CORE_OPTION_VALUES_MAX - 1)
+   {
+      const char *name = retro_dirent_get_name(dir);
+      char path[RETRO_PATH_MAX] = {0};
+      char label[128]           = {0};
+
+      if (!strendswith(name, ".rom") && !strendswith(name, ".bin"))
+         continue;
+
+      snprintf(path, sizeof(path), "%s%s%s", retro_system_data_directory, DIR_SEP_STR, name);
+      if ((puae_rom_type(path) & ROMTYPE_GROUP_MASK) != group)
+         continue;
+
+      snprintf(label, sizeof(label), "%s", name);
+      path_remove_extension(label);
+
+      store[*j].value = strdup(name);
+      store[*j].label = strdup(label);
+      def->values[*j].value = store[*j].value;
+      def->values[*j].label = store[*j].label;
+      ++*j;
+   }
+   retro_closedir(dir);
+}
+
+/* Full path of the first ROM of exactly this type in the system data
+ * directory, or an empty string */
+static void puae_find_rom(uae_u32 type, char *out, size_t outsize)
+{
+   RDIR *dir;
+
+   out[0] = 0;
+   if (!path_is_directory(retro_system_data_directory))
+      return;
+   if (!(dir = retro_opendir(retro_system_data_directory)))
+      return;
+   while (retro_readdir(dir))
+   {
+      const char *name = retro_dirent_get_name(dir);
+      char path[RETRO_PATH_MAX] = {0};
+
+      if (!strendswith(name, ".rom") && !strendswith(name, ".bin"))
+         continue;
+      snprintf(path, sizeof(path), "%s%s%s", retro_system_data_directory, DIR_SEP_STR, name);
+      if ((puae_rom_type(path) & ROMTYPE_MASK) == type)
+      {
+         snprintf(out, outsize, "%s", path);
+         break;
+      }
+   }
+   retro_closedir(dir);
 }
 
 static void retro_set_core_options()
@@ -810,6 +909,16 @@ static void retro_set_core_options()
          "expansion",
          "Expansions",
          "Accelerator boards, cartridges, keyboard."
+      },
+      {
+         "rtg",
+         "Graphics Card",
+         "Picasso96 (uaegfx) and graphics boards."
+      },
+      {
+         "fmv",
+         "CD32 FMV",
+         "Full Motion Video cartridge for the CD32."
       },
       {
          "chipset",
@@ -1299,7 +1408,7 @@ static void retro_set_core_options()
          "puae_cart_file",
          "Expansions > Cartridge",
          "Cartridge",
-         "Cartridge images go in 'system/uae/' or 'system/uae_data/'.\nCore restart required.",
+         "Freezer cartridges (Action Replay, Nordic Power, X-Power, Super IV...) found in 'system/uae/' or 'system/uae_data/', recognized by content. 'HRTMon' is built in.\nCore restart required.",
          NULL,
          "expansion",
          {
@@ -1307,6 +1416,80 @@ static void retro_set_core_options()
             { NULL, NULL },
          },
          NULL
+      },
+      {
+         "puae_rtg_board",
+         "Graphics Card > Board",
+         "Board",
+         "'UAE' boards are the Picasso96 'uaegfx' card: fastest, need Picasso96 (or P96) installed in the Amiga with the uaegfx driver. The others emulate the real boards and need their own drivers. Zorro III needs a 32-bit CPU (68020 with 32-bit addressing, 68030 or higher), not the A1200's 68EC020. Picasso IV needs its ROM in 'system/uae/' or 'system/uae_data/'.\nCore restart required.",
+         NULL,
+         "rtg",
+         {
+            { "disabled", NULL },
+            { "ZorroIII", "UAE Zorro III (uaegfx)" },
+            { "ZorroII", "UAE Zorro II (uaegfx)" },
+            { "PicassoII", "Picasso II [Zorro II]" },
+            { "PicassoII+", "Picasso II+ [Zorro II]" },
+            { "PicassoIV_Z2", "Picasso IV [Zorro II]" },
+            { "PicassoIV_Z3", "Picasso IV [Zorro III]" },
+            { "CV64_Z3", "CyberVision 64 [Zorro III]" },
+            { "CV643D_Z2", "CyberVision 64/3D [Zorro II]" },
+            { "CV643D_Z3", "CyberVision 64/3D [Zorro III]" },
+            { "Piccolo_Z2", "Piccolo [Zorro II]" },
+            { "Piccolo_Z3", "Piccolo [Zorro III]" },
+            { "PiccoloSD64_Z2", "Piccolo SD64 [Zorro II]" },
+            { "PiccoloSD64_Z3", "Piccolo SD64 [Zorro III]" },
+            { "Spectrum28/24_Z2", "Spectrum 28/24 [Zorro II]" },
+            { "Spectrum28/24_Z3", "Spectrum 28/24 [Zorro III]" },
+            { "Retina_Z2", "Retina [Zorro II]" },
+            { "Retina_Z3", "Retina [Zorro III]" },
+            { "RainbowIII", "Rainbow III [Zorro III]" },
+            { "MerlinZ2", "Merlin [Zorro II]" },
+            { "MerlinZ3", "Merlin [Zorro III]" },
+            { "GraffityZ2", "Graffity [Zorro II]" },
+            { "GraffityZ3", "Graffity [Zorro III]" },
+            { "Visiona", "Visiona [Zorro II]" },
+            { "Domino", "Domino [Zorro II]" },
+            { "OmnibusET4000", "oMniBus ET4000AX [Zorro II]" },
+            { "OmnibusET4000W32", "oMniBus ET4000W32 [Zorro II]" },
+            { NULL, NULL },
+         },
+         "disabled"
+      },
+      {
+         "puae_rtg_vram",
+         "Graphics Card > VRAM",
+         "VRAM",
+         "Graphics card memory. 'Automatic': 32 MB for UAE Zorro III, 4 MB for UAE Zorro II, the most the real board had for the others.\nCore restart required.",
+         NULL,
+         "rtg",
+         {
+            { "auto", "Automatic" },
+            { "1", "1 MB" },
+            { "2", "2 MB" },
+            { "4", "4 MB" },
+            { "8", "8 MB" },
+            { "16", "16 MB" },
+            { "32", "32 MB" },
+            { "64", "64 MB" },
+            { "128", "128 MB" },
+            { "256", "256 MB" },
+            { NULL, NULL },
+         },
+         "auto"
+      },
+      {
+         "puae_cd32_fmv",
+         "CD32 FMV > Cartridge",
+         "Cartridge",
+         "Full Motion Video cartridge for the CD32 (Video CD, CD-i Digital Video). Needs its ROM in 'system/uae/' or 'system/uae_data/', recognized by content. 'Automatic' uses the first one found. CD32 only.\nCore restart required.",
+         NULL,
+         "fmv",
+         {
+            /* Options filled dynamically later */
+            { NULL, NULL },
+         },
+         "disabled"
       },
       {
          "puae_keyboard_type",
@@ -2988,37 +3171,31 @@ static void retro_set_core_options()
          option_defs_us[i].values[j].label = "disabled";
          ++j;
 
-         /* Scan system data directory for cartridges */
-         if (path_is_directory(retro_system_data_directory))
-         {
-            RDIR *dir;
-            dir = retro_opendir(retro_system_data_directory);
+         option_defs_us[i].values[j].value = ":hrtmon";
+         option_defs_us[i].values[j].label = "HRTMon (built-in)";
+         ++j;
 
-            while (retro_readdir(dir) && j < RETRO_NUM_CORE_OPTION_VALUES_MAX - 1)
-            {
-               const char *name = retro_dirent_get_name(dir);
+         /* Freezer cartridges only (Action Replay, Nordic Power, X-Power,
+          * Super IV...), identified by content: the folder also holds
+          * Kickstarts, accelerator, SCSI and other board ROMs */
+         puae_scan_roms(&option_defs_us[i], &j, puae_carts, ROMTYPE_FREEZER);
 
-               if (strendswith(name, "rom"))
-               {
-                  char value[RETRO_PATH_MAX] = {0};
-                  char label[128]            = {0};
-                  snprintf(value, sizeof(value), "%s", name);
-                  snprintf(label, sizeof(label), "%s", name);
-                  path_remove_extension(label);
+         option_defs_us[i].values[j].value = NULL;
+         option_defs_us[i].values[j].label = NULL;
+      }
+      else if (!strcmp(option_defs_us[i].key, "puae_cd32_fmv"))
+      {
+         j = 0;
+         option_defs_us[i].values[j].value = "disabled";
+         option_defs_us[i].values[j].label = NULL;
+         ++j;
 
-                  puae_carts[j].value = strdup(value);
-                  puae_carts[j].label = strdup(label);
+         option_defs_us[i].values[j].value = "auto";
+         option_defs_us[i].values[j].label = "Automatic";
+         ++j;
 
-                  option_defs_us[i].values[j].value = puae_carts[j].value;
-                  option_defs_us[i].values[j].label = puae_carts[j].label;
-                  ++j;
-               }
-
-               puae_carts[j].value = NULL;
-               puae_carts[j].label = NULL;
-            }
-            retro_closedir(dir);
-         }
+         puae_scan_roms(&option_defs_us[i], &j, puae_fmvs, ROMTYPE_CD32CART);
+         puae_find_rom(ROMTYPE_PICASSOIV, puae_picassoiv_rom, sizeof(puae_picassoiv_rom));
 
          option_defs_us[i].values[j].value = NULL;
          option_defs_us[i].values[j].label = NULL;
@@ -3767,20 +3944,81 @@ static void update_variables(void)
    {
       char cart_full[RETRO_PATH_MAX] = {0};
 
-      if (!strcmp(var.value, "none"))
-         snprintf(cart_full, sizeof(cart_full), "%s", "");
-      else
+      if (!strcmp(var.value, ":hrtmon"))
+         strcat(uae_config, "cart_internal=hrtmon\n");
+      else if (strcmp(var.value, "none"))
+      {
          snprintf(cart_full, sizeof(cart_full), "%s%s%s",
                retro_system_data_directory, DIR_SEP_STR, var.value);
-
-      if (!string_is_empty(cart_full))
-      {
          strcat(uae_config, "cart_file=");
          strcat(uae_config, cart_full);
          strcat(uae_config, "\n");
+      }
+   }
 
-         if (strstr(var.value, "CD32"))
-            strcat(uae_config, "cd32fmv=true\n");
+   GET_VAR("rtg_board")
+   {
+      if (strcmp(var.value, "disabled"))
+      {
+         char rtg_line[RETRO_PATH_MAX + 64] = {0};
+         struct retro_variable vram = { "puae_rtg_vram", NULL };
+         int size = 0;
+
+         if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &vram) && vram.value && strcmp(vram.value, "auto"))
+            size = atoi(vram.value);
+         if (!size)
+         {
+            if (!strcmp(var.value, "ZorroIII"))
+               size = 32;
+            else if (!strcmp(var.value, "ZorroII"))
+               size = 4;
+            else
+            {
+               /* The most the real board had */
+               struct rtgboardconfig rbc = {0};
+               int j, id;
+               for (j = 0; (id = gfxboard_get_id_from_index(j)) >= 0; j++)
+               {
+                  const TCHAR *name = gfxboard_get_configname(id);
+                  if (name && !strcasecmp(name, var.value))
+                  {
+                     rbc.rtgmem_type = id;
+                     size = gfxboard_get_vram_max(&rbc) >> 20;
+                     break;
+                  }
+               }
+               if (!size)
+                  size = 4;
+            }
+         }
+         snprintf(rtg_line, sizeof(rtg_line), "gfxcard_type=%s\ngfxcard_size=%d\n", var.value, size);
+         strcat(uae_config, rtg_line);
+
+         /* Picasso IV: its flash ROM, found by content */
+         if (strstr(var.value, "PicassoIV") && puae_picassoiv_rom[0])
+         {
+            snprintf(rtg_line, sizeof(rtg_line), "picassoiv_rom_file=%s\n", puae_picassoiv_rom);
+            strcat(uae_config, rtg_line);
+         }
+      }
+   }
+
+   GET_VAR("cd32_fmv")
+   {
+      const char *rom = var.value;
+
+      /* 'auto': the first FMV ROM the option scan found */
+      if (!strcmp(rom, "auto"))
+         rom = puae_fmvs[2].value;
+
+      if (strcmp(var.value, "disabled") && rom)
+      {
+         char fmv_full[RETRO_PATH_MAX] = {0};
+         snprintf(fmv_full, sizeof(fmv_full), "%s%s%s",
+               retro_system_data_directory, DIR_SEP_STR, rom);
+         strcat(uae_config, "cd32fmv_rom_file=");
+         strcat(uae_config, fmv_full);
+         strcat(uae_config, "\n");
       }
    }
 
@@ -9642,9 +9880,80 @@ static bool retro_update_av_info(void)
    return true;
 }
 
+/* RTG (Picasso96 / graphics board) screen: while the Amiga shows it, the
+ * frontend gets the board's framebuffer at its own resolution instead of
+ * the chipset picture (retrodep/picasso96_retro.c). Returns true when the
+ * frame was presented. */
+extern bool retro_rtg_frame(const uae_u32 **buf, int *width, int *height, int *pitch);
+
+static bool retro_rtg_present(void)
+{
+   static bool rtg_on_old = false;
+   static int rtg_w_old = 0, rtg_h_old = 0;
+   static uint16_t *rtg_565 = NULL;
+   const uae_u32 *rtg = NULL;
+   int w = 0, h = 0, pitch = 0;
+   bool rtg_on = retro_rtg_frame(&rtg, &w, &h, &pitch);
+
+   if (rtg_on != rtg_on_old || (rtg_on && (w != rtg_w_old || h != rtg_h_old)))
+   {
+      struct retro_system_av_info av;
+      retro_get_system_av_info(&av);
+      if (rtg_on)
+      {
+         av.geometry.base_width   = w;
+         av.geometry.base_height  = h;
+         if (av.geometry.max_width < (unsigned)w)
+            av.geometry.max_width = w;
+         if (av.geometry.max_height < (unsigned)h)
+            av.geometry.max_height = h;
+         av.geometry.aspect_ratio = (float)w / (float)h;
+         log_cb(RETRO_LOG_INFO, "RTG screen %dx%d\n", w, h);
+      }
+      else
+      {
+         /* Back to the chipset display: recompute its geometry */
+         request_update_av_info = true;
+         log_cb(RETRO_LOG_INFO, "RTG screen off\n");
+      }
+      environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &av);
+      rtg_on_old = rtg_on;
+      rtg_w_old  = w;
+      rtg_h_old  = h;
+   }
+
+   if (!rtg_on)
+      return false;
+
+   if (pix_bytes == 4)
+      video_cb(rtg, w, h, pitch);
+   else
+   {
+      /* RGB565 frontend */
+      int x, y;
+      if (!rtg_565)
+         rtg_565 = (uint16_t*)malloc(1920 * 1200 * sizeof(uint16_t));
+      if (!rtg_565 || w > 1920 || h > 1200)
+         return true;
+      for (y = 0; y < h; y++)
+      {
+         const uae_u32 *s = (const uae_u32*)((const uint8_t*)rtg + (size_t)y * pitch);
+         uint16_t *d = rtg_565 + (size_t)y * w;
+         for (x = 0; x < w; x++)
+         {
+            uae_u32 c = s[x];
+            d[x] = ((c >> 8) & 0xf800) | ((c >> 5) & 0x07e0) | ((c >> 3) & 0x001f);
+         }
+      }
+      video_cb(rtg_565, w, h, w * sizeof(uint16_t));
+   }
+   return true;
+}
+
 void retro_run(void)
 {
    static uint8_t old_frame = 0;
+   bool rtg_shown;
 
    /* Core options */
    bool updated = false;
@@ -9675,9 +9984,11 @@ void retro_run(void)
    /* Handle statusbar text, audio filter type & video geometry + resolution */
    update_audiovideo();
 
+   /* RTG screen shown: the chipset geometry waits until it is switched off */
+   rtg_shown = retro_rtg_present();
 
    /* AV info change is requested */
-   if (request_update_av_info)
+   if (request_update_av_info && !rtg_shown)
       retro_update_av_info();
 
    /* Fetch the picture from the emulation's raster: the window position
@@ -9739,7 +10050,8 @@ void retro_run(void)
    if ((!retro_statusbar && opt_statusbar & STATUSBAR_MESSAGES && statusbar_message_timer) || retro_statusbar)
       print_statusbar();
 
-   video_cb((old_frame) ? NULL : retro_bmp + retro_bmp_offset, retrow_crop, retroh_crop, retrow << (pix_bytes >> 1));
+   if (!rtg_shown)
+      video_cb((old_frame) ? NULL : retro_bmp + retro_bmp_offset, retrow_crop, retroh_crop, retrow << (pix_bytes >> 1));
    upload_output_audio_buffer();
 
    if (old_frame)

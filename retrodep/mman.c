@@ -27,7 +27,14 @@
 #include "gui.h"
 #include "misc.h"
 
+#if defined(NATMEM_OFFSET)
 size_t max_z3fastmem;
+#else
+/* No reserved natmem window (preinit_shm): Zorro III RAM and the UAE Zorro
+ * III graphics card are allocated on demand, so only the Z3 address space
+ * limits them */
+size_t max_z3fastmem = 1024 * 1024 * 1024;
+#endif
 
 #if defined(NATMEM_OFFSET)
 

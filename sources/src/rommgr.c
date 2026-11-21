@@ -83,6 +83,10 @@ void romlist_add (const TCHAR *path, struct romdata *rd)
 	}
 }
 
+#ifdef __LIBRETRO__
+static struct romdata *getromdatabyconfigname(const TCHAR *name);
+#endif
+
 struct romdata *getromdatabypath (const TCHAR *path)
 {
 	int i;
@@ -95,6 +99,12 @@ struct romdata *getromdatabypath (const TCHAR *path)
 		if (my_issamepath(rl[i].path, path))
 			return rl[i].rd;
 	}
+#ifdef __LIBRETRO__
+	/* WinUAE's GUI adds the built-in ROMs (":HRTMon") to the scanned ROM
+	 * list; there is no such scan here, so look them up in the database */
+	if (path[0] == ':')
+		return getromdatabyconfigname(path + 1);
+#endif
 	return NULL;
 }
 
@@ -1578,6 +1588,17 @@ struct romdata *getromdatabyid (int id)
 	}
 	return 0;
 }
+
+#ifdef __LIBRETRO__
+static struct romdata *getromdatabyconfigname(const TCHAR *name)
+{
+	for (int i = 0; roms[i].name; i++) {
+		if (roms[i].group == 0 && roms[i].configname && !_tcscmp(roms[i].configname, name))
+			return &roms[i];
+	}
+	return NULL;
+}
+#endif
 
 struct romdata *getromdatabyidgroup (int id, int group, int subitem)
 {
