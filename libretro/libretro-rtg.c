@@ -1035,12 +1035,12 @@ bool rtg_setup(const struct rtg_preset *p, const char *content,
          if (!strcasecmp(name, rtg_known_args[i].exe))
             args = rtg_known_args[i].args;
       /* Another World 20th Anniversary Edition: the largest version whose
-       * backgrounds have been converted (game/<format>/data<size>) */
+       * backgrounds have been converted (game/RAW/data<size>) */
       if (!strcasecmp(name, "AnotherWorld_RTG"))
       {
          static const char *aw_sizes[][2] = {
-            { "BMP/data1728x1080", "SIZE 1728x1080" },
-            { "BGZ/data1280x800",  "SIZE 1280x800" },
+            { "RAW/data1728x1080", "SIZE 1728x1080" },
+            { "RAW/data1280x800",  "SIZE 1280x800" },
             { "RAW/data640x400",   "SIZE 640x400" },
          };
          char exedir[RETRO_PATH_MAX], d[RETRO_PATH_MAX];
