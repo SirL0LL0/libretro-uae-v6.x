@@ -449,9 +449,12 @@ static const unix_rtg_mode_size unix_rtg_standard_mode_sizes[] = {
     { 800, 600 },
     { 1024, 768 },
     { 1280, 720 },
+    { 1280, 800 },
     { 1280, 1024 },
     { 1440, 900 },
     { 1600, 1200 },
+    /* Another World 20th Anniversary Edition for Amiga, 32-bit version */
+    { 1728, 1080 },
     { 1920, 1080 },
     { 0, 0 }
 };

@@ -15,6 +15,11 @@
 //#define NOFLAGS_SUPPORT_GENCOMP
 //#define HAVE_GET_WORD_UNSWAPPED
 //#define NATMEM_OFFSET natmem_offset
+/* JIT (-DJIT from the Makefile on x86-64): faults of direct memory accesses
+ * in translated code are handled from the signal context (jit/x86/exception_handler.c) */
+#if defined(JIT) && defined(__linux__) && (defined(__x86_64__) || defined(__i386__))
+#define HAVE_STRUCT_UCONTEXT_UC_MCONTEXT_GREGS 1
+#endif
 #define USE_NORMAL_CALLING_CONVENTION 0
 #define USE_X86_FPUCW 1
 //#define CATWEASEL /* Catweasel MK2/3 support */

@@ -67,28 +67,17 @@ void write_log (const char *fmt, ...)
 #endif
 
 #ifdef JIT
+extern void uae_reset (int, int);
+/* As WinUAE od-unix/logging.cpp: log and reset the emulation */
 void jit_abort (const char *fmt, ...)
 {
+    char buffer[1024];
     va_list ap;
     va_start (ap, fmt);
-#ifdef HAVE_VFPRINTF
-    vfprintf (stderr, fmt, ap);
-#else
-    /* Technique stolen from GCC.  */
-    {
-	int x1, x2, x3, x4, x5, x6, x7, x8;
-	x1 = va_arg (ap, int);
-	x2 = va_arg (ap, int);
-	x3 = va_arg (ap, int);
-	x4 = va_arg (ap, int);
-	x5 = va_arg (ap, int);
-	x6 = va_arg (ap, int);
-	x7 = va_arg (ap, int);
-	x8 = va_arg (ap, int);
-	fprintf (stderr, fmt, x1, x2, x3, x4, x5, x6, x7, x8);
-    }
-#endif
-	uae_reset(1, 0);
+    vsnprintf (buffer, sizeof(buffer), fmt, ap);
+    va_end (ap);
+    write_log ("JIT: Serious error: %s\n", buffer);
+    uae_reset (1, 0);
 }
 #endif
 

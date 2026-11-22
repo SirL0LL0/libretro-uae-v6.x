@@ -1,5 +1,5 @@
 /*
- * compiler/compemu_midfunc_arm.c - Native MIDFUNCS for ARM (JIT v2)
+ * compiler/compemu_midfunc_arm.cpp - Native MIDFUNCS for ARM (JIT v2)
  *
  * Copyright (c) 2014 Jens Heitmann of ARAnyM dev team (see AUTHORS)
  *
@@ -27,7 +27,7 @@
  *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  *
  *  Note:
- *  	File is included by compemu_support.c
+ *  	File is included by compemu_support.cpp
  *
  */
 

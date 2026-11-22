@@ -11,6 +11,9 @@
 #include "sysconfig.h"
 #include "sysdeps.h"
 
+/* With the JIT (NATMEM_OFFSET) the natmem version is used: mman_natmem.c */
+#ifndef NATMEM_OFFSET
+
 #ifdef HAVE_SYS_SYSCTL_H
 #include <sys/sysctl.h>
 #endif
@@ -1407,3 +1410,5 @@ static ULONG getz2rtgaddr (void)
 bool jit_direct_compatible_memory;
 
 #endif /* NATMEM_OFFSET */
+
+#endif /* !NATMEM_OFFSET */

@@ -37,6 +37,9 @@ ifneq (,$(findstring unix,$(platform)))
    LDFLAGS += -lpthread
    CFLAGS += -Wstringop-overflow=0 -Wno-unused-result
    SHARED := -shared -Wl,--version-script=$(CORE_DIR)/libretro/link.T -Wl,--gc-sections
+   ifneq (,$(filter x86_64 amd64,$(shell uname -m)))
+      HAVE_JIT ?= 1
+   endif
    ifneq ($(findstring Haiku,$(shell uname -s)),)
       LDFLAGS += -lroot -lnetwork
       ifneq ($(findstring BePC,$(shell uname -m)),)

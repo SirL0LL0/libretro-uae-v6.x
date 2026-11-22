@@ -54,10 +54,40 @@ static int get_fs_usage_fake (const TCHAR *path, const TCHAR *disk, struct fs_us
     return 0;
 }
 
+/* The real free space of the host drive (programs that check it before
+ * writing, e.g. installers and data converters), the fixed values when the
+ * platform cannot tell */
+#if defined(_WIN32)
+#include <windows.h>
+int get_fs_usage (const TCHAR *path, const TCHAR *disk, struct fs_usage *fsp)
+{
+    ULARGE_INTEGER avail, total, totalfree;
+    if (path && GetDiskFreeSpaceExA(path, &avail, &total, &totalfree)) {
+        fsp->total = (uae_s64)total.QuadPart;
+        fsp->avail = (uae_s64)avail.QuadPart;
+        return 0;
+    }
+    return get_fs_usage_fake(path, disk, fsp);
+}
+#elif defined(__unix__) || defined(__APPLE__)
+#include <sys/statvfs.h>
+int get_fs_usage (const TCHAR *path, const TCHAR *disk, struct fs_usage *fsp)
+{
+    struct statvfs st;
+    if (path && !statvfs(path, &st) && st.f_blocks) {
+        uae_u64 frsize = st.f_frsize ? st.f_frsize : st.f_bsize;
+        fsp->total = (uae_s64)(st.f_blocks * frsize);
+        fsp->avail = (uae_s64)(st.f_bavail * frsize);
+        return 0;
+    }
+    return get_fs_usage_fake(path, disk, fsp);
+}
+#else
 int get_fs_usage (const TCHAR *path, const TCHAR *disk, struct fs_usage *fsp)
 {
     return get_fs_usage_fake(path, disk, fsp);
 }
+#endif
 #else
 
 #ifdef WINDOWS

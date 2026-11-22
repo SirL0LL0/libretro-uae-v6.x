@@ -1,5 +1,5 @@
 /*
- * compiler/codegen_arm.c - ARM code generator
+ * compiler/codegen_arm.cpp - ARM code generator
  *
  * Copyright (c) 2013 Jens Heitmann of ARAnyM dev team (see AUTHORS)
  *

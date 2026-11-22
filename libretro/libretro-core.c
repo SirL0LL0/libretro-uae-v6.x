@@ -23,6 +23,7 @@
 #include "autoconf.h"
 #include "rommgr.h"
 #include "gfxboard.h"
+#include "libretro-rtg.h"
 #include "sounddep/sound.h"
 
 #ifndef MAX_STOP
@@ -94,7 +95,7 @@ unsigned int opt_model_options_display = 0;
 unsigned int opt_audio_options_display = 0;
 unsigned int opt_video_options_display = 0;
 unsigned int opt_mapping_options_display = 1;
-char opt_model[10] = {0};
+char opt_model[16] = {0};
 char opt_model_fd[10] = {0};
 char opt_model_hd[10] = {0};
 char opt_model_cd[10] = {0};
@@ -191,6 +192,14 @@ extern bool inputdevice_finalized;
 uint8_t pix_bytes = 2;
 static bool pix_bytes_initialized = false;
 static bool cpu_cycle_exact_force = false;
+/* RTG game preset in use (libretro-rtg.c) */
+static const struct rtg_preset *rtg_active = NULL;
+
+/* 'CPU > JIT' configuration: WinUAE defaults, 16 MB translation cache,
+ * JIT FPU, soft flush, direct memory access */
+#define JIT_CONFIG_ON  "cachesize=16384\ncomp_fpu=true\ncomp_constjump=true\ncomp_flushmode=soft\n" \
+                       "comp_trustbyte=direct\ncomp_trustword=direct\ncomp_trustlong=direct\ncomp_trustnaddr=direct\n"
+#define JIT_CONFIG_OFF "cachesize=0\n"
 #define SOUND_FILTER_TYPE_UPDATE_TIMER 2
 static unsigned char automatic_sound_filter_type_update_timer = SOUND_FILTER_TYPE_UPDATE_TIMER;
 static bool fake_ntsc = false;
@@ -970,7 +979,7 @@ static void retro_set_core_options()
          "puae_model",
          "Machine > Model",
          "Model",
-         "'Automatic' defaults to 'A500' with floppy disks, 'A1200' with hard drives and 'CD32' with compact discs. 'Automatic' can be overridden with file path tags.\nCore restart required.",
+         "'Automatic' defaults to 'A500' with floppy disks, 'A1200' with hard drives and 'CD32' with compact discs. 'Automatic' can be overridden with file path tags.\n'RTG' presets start RTG games (LHA archive or directory) automatically, like WHDLoad: A4000/040, 68040 + FPU, 64M Z3 Fast and the graphics card. They need in 'system/uae/RTG/' (or 'system/uae_data/RTG/'): a Workbench 3.x disk (ADF, zipped ADF works) and Picasso96.lha (aminet.net/driver/video/Picasso96.lha). Optional: m68k-amigaos-ahiusr.lha and AHI-Paula.lha (Aminet) for AHI sound, gtlayout.lha, an 'Extra' folder copied as is to the system drive. 'A4000/060' also needs Mu680x0Libs.lha (Aminet). 'CyberVision 64': the real board, slower than 'UAE'.\nCore restart required.",
          NULL,
          "machine",
          {
@@ -995,6 +1004,9 @@ static void retro_set_core_options()
             { "CDTVCR", "CDTV-CR (v2.05, 1M Chip)" },
             { "CD32", "CD32 (2M Chip)" },
             { "CD32FR", "CD32 (2M Chip + 8M Fast)" },
+            { "RTG_UAE", "A4000/040 RTG: UAE Zorro III (P96 uaegfx)" },
+            { "RTG_CV64", "A4000/040 RTG: CyberVision 64" },
+            { "RTG_UAE060", "A4000/060 RTG: UAE Zorro III (P96 uaegfx)" },
             { NULL, NULL },
          },
          "auto"
@@ -1230,6 +1242,22 @@ static void retro_set_core_options()
          },
          "0.0"
       },
+#ifdef JIT
+      {
+         "puae_cpu_jit",
+         "CPU > JIT",
+         "JIT",
+         "Translates the 68020/030/040 code into host code: many times faster, for RTG games and demanding software. Needs 'CPU Compatibility' set to 'Normal' (not with 'Cycle-exact' or the MMU). With a 68040/060 the FPU instructions the CPU lacks need 68040.library/68060.library, as on a real Amiga.\nCore restart required.",
+         NULL,
+         "cpu",
+         {
+            { "disabled", NULL },
+            { "enabled", NULL },
+            { NULL, NULL },
+         },
+         "disabled"
+      },
+#endif
       {
          "puae_cpu_multiplier",
          "CPU > CPU Cycle-exact Speed",
@@ -4524,6 +4552,13 @@ static void update_variables(void)
       }
    }
 
+#ifdef JIT
+   GET_VAR("cpu_jit")
+   {
+      strcat(uae_config, !strcmp(var.value, "enabled") ? JIT_CONFIG_ON : JIT_CONFIG_OFF);
+   }
+#endif
+
    GET_VAR("cpu_throttle")
    {
       /* "max": WinUAE "fastest possible", the CPU gets all the host time
@@ -5838,6 +5873,26 @@ void retro_init(void)
    if (!environ_cb(RETRO_ENVIRONMENT_GET_PERF_INTERFACE, &perf_cb))
       perf_cb.get_time_usec = NULL;
 
+#ifdef NATMEM_OFFSET
+   /* JIT: reserve the Amiga address space (natmem) before any configuration
+    * uses its limits, as WinUAE does at startup. Once per process: the
+    * reservation stays when the core is reloaded. */
+   {
+      extern bool preinit_shm(void);
+      static bool natmem_ready = false;
+#if defined(_WIN32) && defined(__x86_64__)
+      /* Windows has a fixed system page at 0x7ffe0000: below 4 GiB there are
+       * only 2 GiB in one piece (from 0x80000000). A natmem that fits there
+       * lets the JIT use its fast direct addressing (no jit_n_addr_unsafe);
+       * 2 GiB is plenty for Z3 RAM and graphics card memory. */
+      extern int maxmem;
+      maxmem = 2040;
+#endif
+      if (!natmem_ready)
+         natmem_ready = preinit_shm();
+   }
+#endif
+
    /* Clean ZIP temp */
    if (!string_is_empty(retro_temp_directory) && path_is_directory(retro_temp_directory))
       remove_recurse(retro_temp_directory);
@@ -5888,6 +5943,9 @@ void retro_deinit(void)
 {
    if (save_state_file_size)
       leave_program();
+
+   /* Keep what an RTG game wrote before its temporary copy goes */
+   rtg_shutdown();
 
    /* Clean ZIP temp */
    if (!string_is_empty(retro_temp_directory) && path_is_directory(retro_temp_directory))
@@ -7646,17 +7704,169 @@ static char* emu_config(int config)
    return uae_preset_config;
 }
 
+/* RTG game preset of the current configuration, NULL for the others */
+
 static void retro_config_preset(const char *model)
 {
-   int model_int = emu_config_int(model);
+   const struct rtg_preset *rtg = rtg_preset_find(model);
+   int model_int;
+
+   /* RTG presets are built on a model preset */
+   rtg_active = rtg;
+   if (rtg)
+      model = rtg->base;
+   model_int = emu_config_int(model);
    strlcpy(uae_model_config, emu_config(model_int), sizeof(uae_model_config));
    strlcpy(uae_preset, emu_config_string("model", model_int), sizeof(uae_preset));
+   if (rtg)
+   {
+      char rtg_config[512];
+      rtg_preset_config(rtg, rtg_config, sizeof(rtg_config));
+      strlcat(uae_model_config, rtg_config, sizeof(uae_model_config));
+   }
 
    /* Allow Kickstart overrides in custom presets */
    if (string_is_empty(uae_kickstart))
    {
       strlcpy(uae_kickstart, emu_config_string("kickstart", model_int), sizeof(uae_kickstart));
       strlcpy(uae_kickstart_ext, emu_config_string("kickstart_ext", model_int), sizeof(uae_kickstart_ext));
+   }
+}
+
+/* Configuration lines of the 'CPU Compatibility' and 'CPU Speed' option values */
+static void retro_config_cpu_options(const char *compat, const char *throttle)
+{
+   if (!strcmp(compat, "normal"))
+      retro_config_append("cpu_compatible=false\ncpu_cycle_exact=false\ncpu_memory_cycle_exact=false\nblitter_cycle_exact=false\n");
+   else if (!strcmp(compat, "compatible"))
+      retro_config_append("cpu_compatible=true\ncpu_cycle_exact=false\ncpu_memory_cycle_exact=false\nblitter_cycle_exact=false\n");
+   else if (!strcmp(compat, "memory"))
+      retro_config_append("cpu_compatible=true\ncpu_cycle_exact=false\ncpu_memory_cycle_exact=true\nblitter_cycle_exact=true\n");
+   else if (!strcmp(compat, "exact"))
+      retro_config_append("cpu_compatible=true\ncpu_cycle_exact=true\ncpu_memory_cycle_exact=true\nblitter_cycle_exact=true\n");
+
+   if (!strcmp(throttle, "max") && perf_cb.get_time_usec)
+      retro_config_append("cpu_speed=max\ncpu_throttle=0.0\n");
+   else if (*throttle)
+      retro_config_append("cpu_speed=real\ncpu_throttle=%s\n", strcmp(throttle, "max") ? throttle : "0.0");
+}
+
+static bool retro_set_option(const char *key, const char *value)
+{
+   struct retro_variable var = { key, value };
+   return environ_cb(RETRO_ENVIRONMENT_SET_VARIABLE, &var);
+}
+
+/* RTG presets with 'fast_cpu' need the fastest CPU ('CPU Compatibility'
+ * Normal, 'CPU Speed' Max and, where the core has it, 'JIT' on), not the
+ * cycle-exact default. When such a preset is chosen, the options are set
+ * once, in the frontend, and the user can change them again. The previous
+ * values are kept in <saves>/RTG-Saves/.cpu-options ("model compat throttle
+ * jit") and put back when another model is chosen, unless the user has
+ * changed the options in the meantime. */
+#ifdef JIT
+#define RTG_JIT_VALUE "enabled"
+#else
+#define RTG_JIT_VALUE NULL
+#endif
+static void rtg_cpu_options(void)
+{
+   struct retro_variable cv = { "puae_cpu_compatibility", NULL };
+   struct retro_variable tv = { "puae_cpu_throttle", NULL };
+   struct retro_variable jv = { "puae_cpu_jit", NULL };
+   char dir[RETRO_PATH_MAX], path[RETRO_PATH_MAX];
+   char compat[32] = "", throttle[32] = "", jit[32] = "-";
+   char st_model[64] = "", st_compat[32] = "", st_throttle[32] = "", st_jit[32] = "";
+   const char *want_jit = RTG_JIT_VALUE;
+   bool want = rtg_active && rtg_active->fast_cpu;
+   bool state = false, set_cpu = true;
+   int n = 0;
+   FILE *f;
+
+   if (string_is_empty(retro_save_directory))
+      return;
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &cv) && cv.value)
+      strlcpy(compat, cv.value, sizeof(compat));
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &tv) && tv.value)
+      strlcpy(throttle, tv.value, sizeof(throttle));
+   if (want_jit && environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &jv) && jv.value)
+      strlcpy(jit, jv.value, sizeof(jit));
+
+   path_join(dir, retro_save_directory, "RTG-Saves");
+   path_join(path, dir, ".cpu-options");
+   if ((f = fopen(path, "r")))
+   {
+      n = fscanf(f, "%63s %31s %31s %31s", st_model, st_compat, st_throttle, st_jit);
+      state = n >= 3;
+      fclose(f);
+   }
+   if (n < 4)
+      strlcpy(st_jit, "-", sizeof(st_jit));
+
+   if (want)
+   {
+      bool jit_done = !want_jit || !strcmp(jit, want_jit);
+      /* Chosen before, the options are the user's now (the JIT is still
+       * proposed once to a state written before the core had it) */
+      if (state && !strcmp(st_model, rtg_active->model))
+      {
+         if (n >= 4 || !want_jit)
+            return;
+         set_cpu = false;
+      }
+      else if (!strcmp(compat, "normal") && !strcmp(throttle, "max") && jit_done)
+         return;
+      if ((set_cpu && (!retro_set_option("puae_cpu_compatibility", "normal")
+                    || !retro_set_option("puae_cpu_throttle", "max")))
+       || (want_jit && !retro_set_option("puae_cpu_jit", want_jit)))
+      {
+         snprintf(retro_message_msg, sizeof(retro_message_msg),
+               want_jit ? "RTG preset: set 'CPU Compatibility' to 'Normal', 'CPU Speed' to 'Max' and 'JIT' on for full speed."
+                        : "RTG preset: set 'CPU Compatibility' to 'Normal' and 'CPU Speed' to 'Max' for full speed.");
+         retro_message = true;
+         return;
+      }
+      path_mkdir(dir);
+      if ((f = fopen(path, "w")))
+      {
+         /* The values before the first RTG preset */
+         fprintf(f, "%s %s %s %s\n", rtg_active->model,
+               state ? st_compat : (*compat ? compat : "-"),
+               state ? st_throttle : (*throttle ? throttle : "-"),
+               state && n >= 4 ? st_jit : jit);
+         fclose(f);
+      }
+      if (set_cpu)
+         retro_config_cpu_options("normal", "max");
+      else
+         retro_config_cpu_options(compat, throttle);
+      if (want_jit)
+         retro_config_append(JIT_CONFIG_ON);
+      log_cb(RETRO_LOG_INFO, "RTG preset: CPU options set (were '%s', '%s', JIT '%s').\n", compat, throttle, jit);
+      snprintf(retro_message_msg, sizeof(retro_message_msg),
+            !set_cpu ? "RTG preset: 'JIT' turned on."
+            : want_jit ? "RTG preset: 'CPU Compatibility' set to 'Normal', 'CPU Speed' to 'Max', 'JIT' on."
+                       : "RTG preset: 'CPU Compatibility' set to 'Normal' and 'CPU Speed' to 'Max'.");
+      retro_message = true;
+   }
+   else if (state)
+   {
+      /* Back to the previous values, if they are still the preset's */
+      if (!strcmp(compat, "normal") && !strcmp(throttle, "max")
+       && strcmp(st_compat, "-") && strcmp(st_throttle, "-")
+       && retro_set_option("puae_cpu_compatibility", st_compat)
+       && retro_set_option("puae_cpu_throttle", st_throttle))
+      {
+         retro_config_cpu_options(st_compat, st_throttle);
+         log_cb(RETRO_LOG_INFO, "CPU options back to '%s', '%s' after the RTG preset.\n", st_compat, st_throttle);
+      }
+      if (want_jit && !strcmp(jit, want_jit) && strcmp(st_jit, "-")
+       && retro_set_option("puae_cpu_jit", st_jit))
+      {
+         retro_config_append(!strcmp(st_jit, "enabled") ? JIT_CONFIG_ON : JIT_CONFIG_OFF);
+         log_cb(RETRO_LOG_INFO, "JIT back to '%s' after the RTG preset.\n", st_jit);
+      }
+      remove(path);
    }
 }
 
@@ -7824,7 +8034,12 @@ static bool retro_create_config(void)
          /* Check if model is specified in the path on 'Automatic' */
          if (!strcmp(opt_model, "auto"))
          {
-            if (strstr(full_path, "(A4060)") || strstr(full_path, "(060)"))
+            if (strstr(full_path, "(RTG)"))
+            {
+               log_cb(RETRO_LOG_INFO, "Found \"(RTG)\" in: \"%s\".\n", full_path);
+               retro_config_preset("RTG_UAE");
+            }
+            else if (strstr(full_path, "(A4060)") || strstr(full_path, "(060)"))
             {
                log_cb(RETRO_LOG_INFO, "Found \"(A4060)\" or \"(060)\" in: \"%s\".\n", full_path);
                retro_config_preset("A4060");
@@ -7988,8 +8203,40 @@ static bool retro_create_config(void)
                display_current_image(dc->labels[0], true);
             }
 
+            /* RTG game preset: its own system drive instead of WHDLoad */
+            if (rtg_active && dc->count)
+            {
+               char rtg_sys[RETRO_PATH_MAX]  = {0};
+               char rtg_game[RETRO_PATH_MAX] = {0};
+               char rtg_msg[512]             = {0};
+               if (rtg_setup(rtg_active, dc->files[0], retro_system_data_directory, retro_save_directory,
+                     rtg_sys, sizeof(rtg_sys), rtg_game, sizeof(rtg_game), rtg_msg, sizeof(rtg_msg)))
+               {
+                  /* Mount the writable copy of an archived game */
+                  if (strcmp(rtg_game, dc->files[0]))
+                  {
+                     free(dc->files[0]);
+                     dc->files[0] = strdup(rtg_game);
+                  }
+#ifdef WIN32
+                  tmp_str = string_replace_substring(rtg_sys, strlen(rtg_sys), "\\", strlen("\\"), "\\\\", strlen("\\\\"));
+#else
+                  tmp_str = strdup(rtg_sys);
+#endif
+                  /* Boots before the game drive */
+                  retro_config_append("filesystem2=rw,RTG:RTG:\"%s\",1\n", tmp_str);
+                  free(tmp_str);
+                  tmp_str = NULL;
+               }
+               else
+               {
+                  log_cb(RETRO_LOG_ERROR, "%s\n", rtg_msg);
+                  snprintf(retro_message_msg, sizeof(retro_message_msg), "%s", rtg_msg);
+                  retro_message = true;
+               }
+            }
             /* WHDLoad support */
-            if (opt_use_whdload)
+            else if (opt_use_whdload)
             {
                /* Manipulate WHDLoad.prefs */
                int WHDLoad_ConfigDelay = 0;
@@ -8641,6 +8888,9 @@ static bool retro_create_config(void)
          retro_config_kickstart();
       }
    }
+
+   /* RTG presets: suggested CPU options when chosen, the previous ones back after */
+   rtg_cpu_options();
 
    /* Scan region tags only with automatic region */
    if (opt_region_auto)
@@ -9957,6 +10207,15 @@ void retro_run(void)
 
    /* Core options */
    bool updated = false;
+
+#ifdef JIT
+   /* The JIT needs its segfault handler in front of the frontend's */
+   if (currprefs.cachesize)
+   {
+      extern void jit_check_exception_handler(void);
+      jit_check_exception_handler();
+   }
+#endif
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated)
       update_variables();
 
@@ -10179,6 +10438,9 @@ void retro_unload_game(void)
 {
    /* Ensure WHDLoad saves are written with write cache enabled */
    whdload_quitkey();
+
+   /* RTG game: keep the files it wrote, remove its temporary copy */
+   rtg_shutdown();
 
    /* Gzip savedisks */
    if (dc && dc->count > 1 && !string_is_empty(changed_prefs.floppyslots[0].df))

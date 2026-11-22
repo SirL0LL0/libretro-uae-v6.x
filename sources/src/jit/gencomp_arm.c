@@ -4204,6 +4204,11 @@ gen_opcode(unsigned long int opcode) {
 		break;
 
 	case i_LINK:
+		comprintf("\tif (srcreg == 7) {\n"
+				"\t\tm68k_pc_offset = m68k_pc_offset_thisinst;\n"
+				"\t\tFAIL(1);\n"
+				"\t\treturn;\n"
+				"\t}\n");
 		genamode(curi->smode, "srcreg", sz_long, "src", 1, 0);
 		genamode(curi->dmode, "dstreg", curi->size, "offs", 1, 0);
 		comprintf("\tsub_l_ri(15,4);\n"
@@ -5043,8 +5048,8 @@ int main(void)
 		"extern const struct comptbl op_smalltbl_0_comp_ff[];\n"
 		"");
 
-	stblfile = fopen("compstbl.c", "wb");
-	if (freopen("compemu.c", "wb", stdout) == NULL)
+	stblfile = fopen("compstbl.cpp", "wb");
+	if (freopen("compemu.cpp", "wb", stdout) == NULL)
 	{
 		assert(0);
 	}

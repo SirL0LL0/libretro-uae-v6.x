@@ -5145,6 +5145,17 @@ static void vsync_display_render(void)
 
 		draw_denise_line_queue_flush();
 		end_draw_denise();
+#ifdef __LIBRETRO__
+		/* With an RTG screen the chipset display is off: nothing is drawn, so
+		 * unlockscr() does not end the frame. End it here, or retro_run()
+		 * would only return when a native line happens to be drawn (never
+		 * without cycle-exact). */
+		if (custom_disabled) {
+			extern bool libretro_frame_end;
+			libretro_frame_end = true;
+			set_special(1);
+		}
+#endif
 		vsync_handler_render();
 		if (!custom_disabled) {
 			start_draw_denise();

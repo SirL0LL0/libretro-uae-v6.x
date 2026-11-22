@@ -282,6 +282,52 @@ A hard reset (RetroArch `Restart`) restarts the whole emulation with the current
 - Zorro II boards need free Zorro II space: with 8 MB of Z2 Fast RAM (A4000 preset) there is none, use Z3 Fast RAM instead.
 - All need Picasso96 (or P96) installed in the Amiga with the board's driver.
 
+### JIT
+
+`CPU > JIT` translates 68020/030/040/060 code into host code (the WinUAE JIT), on x86-64 hosts (Windows and Linux builds; ARM64 is not done yet). It is many times faster than the interpreter: in a CPU benchmark on the A4000/040 RTG preset, 74 000 loops per second against 8 400 (a real 25 MHz 68040: about 1 300).
+
+- It needs `CPU Compatibility` set to `Normal`, and works without cycle-exact and without the MMU only; with them it is switched off.
+- The 68040/060 FPU instructions the CPU lacks are left to `68040.library`/`68060.library`, as on a real Amiga (the RTG presets' system drive has them when `Mu680x0Libs.lha` is there; tested with Kobo Deluxe and Another World).
+- The Amiga address space is reserved as one block of host memory (2 GB on Windows, so that it fits below 4 GB, which keeps the faster direct memory access). Translated code accesses memory directly; accesses to chip registers and other special memory are caught (exception handler, SIGSEGV) and redirected, and the frontend's own crash handler still gets every other fault.
+- Core restart required.
+
+### RTG game presets
+
+`Machine > Model` has presets that start RTG games like WHDLoad games: load the game's LHA archive (or its directory) and it runs, on a machine that meets its requirements. A file name containing `(RTG)` selects `RTG_UAE` when the model is `Automatic`.
+
+| Preset | Machine | Graphics card | Tested with |
+|--------|---------|---------------|-------------|
+| `A4000/040 RTG: UAE Zorro III (P96 uaegfx)` | A4000, 68040 + FPU, 2M Chip, 8M Fast, 64M Z3 Fast, Kickstart 3.1 (A4000) | UAE Zorro III, 32 MB | Kobo Deluxe RTG (Aminet) with AHI sound |
+| `A4000/040 RTG: CyberVision 64` | same | CyberVision 64 (S3 Trio64), 4 MB | Kobo Deluxe RTG |
+| `A4000/060 RTG: UAE Zorro III (P96 uaegfx)` | A4000, 68060 + FPU, 2M Chip, 8M Fast, 128M Z3 Fast | UAE Zorro III, 32 MB | Kobo Deluxe RTG; needs `Mu680x0Libs.lha` |
+
+RTG games want the fastest CPU. The presets have no MMU (a `CPU Model` of 68030 or better turns it on again), and choosing a UAE preset sets `CPU > CPU Compatibility` to `Normal`, `CPU > CPU Speed` to `Max` and, on x86-64, `CPU > JIT` on in the core options, once: with the JIT an emulated 68040 is about 50 times faster than a real 25 MHz one (about 5 times without it), while the options' default (Cycle-exact) runs it at the real speed, too slow for most RTG games. The options stay yours to change afterwards. When another model is chosen, the previous values come back, unless you changed them in the meantime (the core keeps them in `saves/RTG-Saves/.cpu-options`). Frontends without option changes from the core show a message with the settings instead. The CyberVision 64 preset leaves the options as they are: the emulation of the real board with `CPU Speed` Max does not fit in the frame time.
+
+With the UAE presets the Workbench screen is 640x480 in 16 bit on the board (for games in a window, e.g. Chess AI RTG); with the CyberVision 64 the native screen modes are shown on the board.
+
+Also tested with `RTG_UAE`: Another World 20th Anniversary Edition for Amiga (`AnotherWorld_AGA-RTG.lha`, 640x400x15 with AHI sound, full speed: its benchmark draws 200 frames in 6.3 s of the 11.3 s they last). Its HD backgrounds have to be converted once from your own Steam copy with the port's `convert --size=640x400 <Steam folder> <game folder>`; the converted `game` folder goes in `saves/RTG-Saves/AnotherWorld_AGA-RTG/AnotherWorld20th/` (or is written there when the conversion runs in the core). The core starts the largest converted version (`SIZE 1728x1080`, `1280x800` or `640x400`). The 1728x1080x32 version needs the JIT: with it the same 200 frames take 3.5 s (44 s without, a quarter of the speed). Chess AI RTG (`game/think/chess_ai_rtg.lha`). Deep Red Hearts opens its screen; FlashNG needs `gtlayout.lha`; Digger (`digger-68k`) needs ixemul.library 48 or newer (in `Extra/Libs`).
+
+Support files, provided by the user, go in `system/uae/RTG/` (or `system/uae_data/RTG/` when that folder is used for cartridges), as they are downloaded, no unpacking needed:
+
+| File | Required | Source |
+|------|----------|--------|
+| Workbench 3.x Workbench disk (ADF, or the ZIP with the ADF) | yes | your own Workbench disks, e.g. `Workbench v3.1 rev 40.42 ... (Disk 2 of 6)(Workbench)` |
+| `Picasso96.lha` | yes | [aminet.net/driver/video/Picasso96.lha](https://aminet.net/driver/video/Picasso96.lha) (Picasso96 2.0, shareware: it provides the CyberGraphX API `cybergraphics.library` too) |
+| `m68k-amigaos-ahiusr.lha` | for AHI sound | [aminet.net/driver/audio/m68k-amigaos-ahiusr.lha](https://aminet.net/driver/audio/m68k-amigaos-ahiusr.lha) (AHI 6) |
+| `AHI-Paula.lha` | for AHI sound | [aminet.net/driver/audio/AHI-Paula.lha](https://aminet.net/driver/audio/AHI-Paula.lha) (the Paula driver) |
+| `Mu680x0Libs.lha` | for the 68060 preset | [aminet.net/util/sys/Mu680x0Libs.lha](https://aminet.net/util/sys/Mu680x0Libs.lha) (68060.library by Thomas Richter; the startup patches SetPatch with its `Fixes/SetPatch_40_16.pch` to load it) |
+| `gtlayout.lha` | for games that need gtlayout.library | [aminet.net/dev/gui/gtlayout.lha](https://aminet.net/dev/gui/gtlayout.lha) |
+| `Extra/` folder | no | copied as it is to the system drive, e.g. `Extra/Libs/ixemul.library` for a game that needs more libraries |
+
+These files are not included in the core: their licenses allow free distribution of the original archives, not bundling them in other software.
+
+- The core builds a system drive in `saves/RTG` from these files (their `Libs`, `Devs`, `C`, `L`, `Fonts` and `Classes` directories) and rebuilds it when the files change. It sets up the monitor driver of the preset's board, the AHI preferences (Paula, 8 bit stereo++, 22050 Hz) and the startup.
+- An archived game runs from a temporary copy in `saves/TEMP/RTG-<name>`, which is deleted when the game is closed. The files the game writes there (settings, high scores, converted data) are kept in `saves/RTG-Saves/<name>` and put back in place on the next start, so the game finds them again. Delete that folder to start the game afresh. A directory is used as it is, and the game writes straight into it.
+- AmigaDOS sees the real free space of the drive that holds `saves` (it used to be a fixed 128 MB), so installers and data converters that check it before writing work.
+- The game is mounted as `DH0:` and its executable is found automatically: the one that uses `cybergraphics.library`, `Picasso96API.library` or `rtg.library`, otherwise the program named as its directory. Known ports get their arguments (Kobo Deluxe: `-fullscreen`). A text file `<game>.rtg` next to the game, or in `saves/RTG`, overrides it with a command line relative to `DH0:`, e.g. `KoboDeluxe/KoboDeluxe -fullscreen`.
+- A missing required file is shown as a message, with the folder to put it in.
+- Games that need more than this (other libraries, their own data, a 68060 with `68060.library`) need those files too, in `Extra/` or with the game. Another World AGA-RTG, for example, needs the 20th Anniversary Edition data converted with its Prefs program.
+
 Tested with Picasso96 2.0 on Workbench 3.1 (A4000/040): the Workbench opens on the board at 640x480 with `uaegfx` and with every board above except oMniBus ET4000W32. The amitorture `rtg` module (register level: VRAM, VGA/DAC registers, a 640x480 mode, the 2D engine) passes on the Cirrus, S3 Trio64 and ET4000W32 (Merlin) boards; the Tseng ET4000 boards fail one case (vertical interrupt status) and the oMniBus ET4000W32 one (DAC pixel mask), both in the shared 86Box chip code.
 
 ## Keyboard

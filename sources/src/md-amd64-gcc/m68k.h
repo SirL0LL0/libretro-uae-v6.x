@@ -35,7 +35,9 @@ extern struct flag_struct regflags;
 #define FLAGBIT_Z	14
 #define FLAGBIT_C	8
 #define FLAGBIT_V	0
-#define FLAGBIT_X	8
+/* X in bit 0, as in WinUAE: the x86 JIT stores the carry with SETcc
+ * (duplicate_carry()) and reads it back as 0/1 */
+#define FLAGBIT_X	0
 
 #define FLAGVAL_N	(1 << FLAGBIT_N)
 #define FLAGVAL_Z 	(1 << FLAGBIT_Z)
@@ -60,7 +62,7 @@ extern struct flag_struct regflags;
 #define IOR_CZNV(X) (regflags.cznv |= (X))
 #define SET_CZNV(X) (regflags.cznv = (X))
 
-#define COPY_CARRY() (regflags.x = regflags.cznv)
+#define COPY_CARRY() (regflags.x = regflags.cznv >> (FLAGBIT_C - FLAGBIT_X))
 
 
 /*

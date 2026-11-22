@@ -22,6 +22,7 @@ SOURCES_C += \
 	$(LIBRETRO)/libretro-glue.c \
 	$(LIBRETRO)/libretro-vkbd.c \
 	$(LIBRETRO)/libretro-graph.c \
+	$(LIBRETRO)/libretro-rtg.c \
 	$(DEPS_DIR)/libz/unzip.c \
 	$(DEPS_DIR)/libz/ioapi.c
 
@@ -233,18 +234,24 @@ INC86BOX_GLUE = \
 
 SOURCES_C += $(SOURCES_86BOX)
 
-#SOURCES_C += \
-#	$(EMU)/jit/compemu.c \
-#	$(EMU)/jit/compemu_fpp.c \
-#	$(EMU)/jit/compstbl.c
-#
-#SOURCES_CXX += \
-#	$(EMU)/jit/compemu_support.cpp
+# JIT (WinUAE jit/: x86-64 now, ARM64 to come). HAVE_JIT=1 is set by the
+# platforms that support it (Makefile); it needs the natmem address space.
+ifeq ($(HAVE_JIT),1)
+JIT_SOURCES = \
+	$(EMU)/jit/compemu.c \
+	$(EMU)/jit/compemu_fpp.c \
+	$(EMU)/jit/compemu_support.c \
+	$(EMU)/jit/compstbl.c \
+	$(EMU)/vm.c
+CFLAGS += -DJIT -DUSE_JIT_FPU -DNOFLAGS_SUPPORT_GENCOMP -DSAHF_SETO_PROFITABLE
+SOURCES_C := $(SOURCES_C) $(JIT_SOURCES)
+endif
 
 SOURCES_C += \
 	$(RETRODEP)/gui.c \
 	$(RETRODEP)/main.c \
 	$(RETRODEP)/mman.c \
+	$(RETRODEP)/mman_natmem.c \
 	$(RETRODEP)/parser.c \
 	$(RETRODEP)/picasso96_retro.c \
 	$(RETRODEP)/rtg.c \

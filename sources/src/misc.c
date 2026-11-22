@@ -84,7 +84,9 @@ int uaetcslen(const TCHAR* s)
 }
 
 static struct uae_shmid_ds shmids[MAX_SHMID];
+#ifndef NATMEM_OFFSET /* defined in mman_natmem.c with the JIT */
 uae_u8 *natmem_reserved, *natmem_offset;
+#endif
 
 // this is handled by the graphics drivers and set up in picasso96.c
 #if defined(PICASSO96)
@@ -198,7 +200,9 @@ bool host_read_internet_file(const TCHAR *name, bool checkonly, uae_u8 **data, i
  * --------------------------------------------------------------------------- */
 #include "uae/vm.h"
 
-#ifdef _WIN32
+/* Minimal uae_vm functions; with the JIT the full ones are in vm.c */
+#ifdef JIT
+#elif defined(_WIN32)
 int uae_vm_page_size(void)
 {
 	SYSTEM_INFO si;

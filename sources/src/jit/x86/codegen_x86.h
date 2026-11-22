@@ -198,7 +198,7 @@ enum {
 #define _rXP(R)		((R) > 0 && _rR(R) > 7)
 #else
 #define _rN(R)		((R) & 0x07)
-#define _rR(R)		(int(R))
+#define _rR(R)		((int)(R))
 #define _rXP(R)		(_rR(R) > 7 && _rR(R) < 16)
 #endif
 
@@ -223,7 +223,7 @@ enum {
 #endif
 
 #define _rSP()		(X86_TARGET_64BIT ? (int)X86_RSP : (int)X86_ESP)
-#define _r1e8lP(R)	(int(R) >= X86_SPL && int(R) <= X86_DIL)
+#define _r1e8lP(R)	((int)(R) >= X86_SPL && (int)(R) <= X86_DIL)
 #define _rbpP(R)	(_rR(R) == _rR(X86_RBP))
 #define _rspP(R)	(_rR(R) == _rR(X86_RSP))
 #define _rbp13P(R)	(_rN(R) == _rN(X86_RBP))
@@ -423,15 +423,15 @@ static inline int x86_RIP_addressing_possible(uintptr addr, uintptr offset)
 #if X86_TARGET_64BIT
 	/*
 	 * address of the next instruction.
-	 * The opcode has already been emmitted,
-	 * so this is the size of an 32bit displacement +
+	 * The opcode has already been emitted, but the ModR/M byte has not,
+	 * so this is the size of the ModR/M byte + a 32-bit displacement +
 	 * the size of any immediate value that is part of the instruction (offset),
 	 */
-	uintptr dst = (uintptr)get_target() + 4 + offset;
-	intptr disp = dst - addr;
-	int ok = disp >= -0x80000000LL && disp <= 0x7fffffffLL;
-	/* fprintf(stderr, "x86_RIP_addressing_possible: %llx - %llx %16llx = %d\n", (unsigned long long)dst, (unsigned long long)addr, (long long)disp, ok); */
-	return ok;
+	uintptr next = (uintptr)get_target() + 1 + 4 + offset;
+	if (addr >= next) {
+		return addr - next <= 0x7fffffffULL;
+	}
+	return next - addr <= 0x80000000ULL;
 #else
 	UNUSED(addr);
 	UNUSED(offset);
@@ -443,7 +443,7 @@ static inline int x86_RIP_addressing_possible(uintptr addr, uintptr offset)
 static inline int x86_DISP32_addressing_possible(uintptr addr)
 {
 #if X86_TARGET_64BIT
-	return addr <= 0xFFFFFFFFULL;
+	return addr <= 0x7FFFFFFFULL;
 #else
 	UNUSED(addr);
 	return 1;
@@ -454,7 +454,9 @@ static inline int x86_DISP32_addressing_possible(uintptr addr)
 #define _r_X(   R, D,B,I,S,O)	(_r0P(I) ? (_r0P(B)    ? (!X86_TARGET_64BIT ? _r_D(R,D) : \
 					                 (_x86_RIP_addressing_possible(D, O) ? \
 				                          _r_D(R, (D) - ((uintptr)x86_get_target() + 4 + (O))) : \
-				                          _r_DSIB(R,D))) : \
+				                          (x86_DISP32_addressing_possible(D) ? \
+				                           _r_DSIB(R,D) : \
+				                           x86_emit_failure("x86-64 absolute address is not RIP-relative and does not fit disp32")))) : \
 				           (_rIP(B)    ? _r_D   (R,D                )   : \
 				           (_rsp12P(B) ? _r_DBIS(R,D,_rSP(),_rSP(),1)   : \
 						         _r_DB  (R,D,     B       ))))  : \
@@ -1627,6 +1629,7 @@ enum {
 /*									_format		Opcd		,Mod ,r	    ,m		,mem=dsp+sib	,imm... */
 
 #define LEALmr(MD, MB, MI, MS, RD)	(_REXLmr(MB, MI, RD),		_O_r_X		(0x8d		     ,_r4(RD)		,MD,MB,MI,MS		))
+#define LEAQmr(MD, MB, MI, MS, RD)	(_REXQmr(MB, MI, RD),		_O_r_X		(0x8d		     ,_r8(RD)		,MD,MB,MI,MS		))
 
 #define BSWAPLr(R)			(_REXLrr(0, R),			_OOr		(0x0fc8,_r4(R)							))
 #define BSWAPQr(R)			(_REXQrr(0, R),			_OOr		(0x0fc8,_r8(R)							))

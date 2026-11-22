@@ -6016,7 +6016,6 @@ static void m68k_run_mmu040 (void)
 				cpu_cycles = (*cpufunctbl[regs.opcode])(regs.opcode);
 				cpu_cycles = adjust_cycles(cpu_cycles);
 				regs.instruction_cnt++;
-
 				if (regs.spcflags) {
 					if (do_specialties(cpu_cycles)) {
 						STOPTRY;
@@ -6031,8 +6030,7 @@ static void m68k_run_mmu040 (void)
 				regflags.cznv = f.cznv;
 				regflags.x = f.x;
 				m68k_setpci (regs.instruction_pc);
-			}
-			cpu_restore_fixup();
+			}			cpu_restore_fixup();
 			TRY (prb2) {
 				Exception (prb);
 			} CATCH (prb2) {
@@ -7063,6 +7061,10 @@ void m68k_go (int may_quit)
 		if (libretro_frame_end)
 		{
 			libretro_frame_end = false;
+			/* The frame end flag (set_special(1), unlockscr()) has done its
+			 * job: left set, every instruction would go through
+			 * do_specialties() and JIT blocks would never run */
+			unset_special(1);
 			return 0;
 		}
 #endif
