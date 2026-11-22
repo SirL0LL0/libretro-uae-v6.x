@@ -38,6 +38,13 @@ bool rtg_setup(const struct rtg_preset *p, const char *content,
       char *sys_path, size_t sys_path_size, char *game_path, size_t game_path_size,
       char *msg, size_t msg_size);
 
+/* 'Automatic' model: the RTG preset for the content, or NULL. Tags (CV64),
+ * (RTG060), (RTG040)/(RTG); "RTG" as a word of the file name; or a program
+ * using an RTG API and no WHDLoad slave. The 060 preset falls back to the
+ * 040 one without Mu680x0Libs; a detected (untagged) game needs the support
+ * files, else NULL and 'msg' says what is missing. */
+const char *rtg_auto_preset(const char *content, const char *data_dir, char *msg, size_t msg_size);
+
 /* Keep what the game wrote (<saves>/RTG-Saves/<name>) and remove its
  * temporary copy; when the game ends or before it is set up again */
 void rtg_shutdown(void);

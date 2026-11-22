@@ -14,7 +14,7 @@
 #define frame_time_t uae_s64
 #endif
 
-extern long retro_ticks(void);
+extern long long retro_ticks(void);
 
 /* read_processor_time() and frame_time_t now come from uae/time.h
  * (upstream moved them there). Keep the libretro tick source as the

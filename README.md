@@ -291,9 +291,23 @@ A hard reset (RetroArch `Restart`) restarts the whole emulation with the current
 - The Amiga address space is reserved as one block of host memory (2 GB on Windows, so that it fits below 4 GB, which keeps the faster direct memory access). Translated code accesses memory directly; accesses to chip registers and other special memory are caught (exception handler, SIGSEGV) and redirected, and the frontend's own crash handler still gets every other fault.
 - Core restart required.
 
+`CPU Speed` Max gives the emulated CPU 75% of each frame's time, counted from when the frontend runs the core (it used to be counted from the emulated vertical blank, so most of it went by while RetroArch was presenting the frame and the CPU got little time: Another World's benchmark went from 30 s to 3 s for 200 frames).
+
 ### RTG game presets
 
-`Machine > Model` has presets that start RTG games like WHDLoad games: load the game's LHA archive (or its directory) and it runs, on a machine that meets its requirements. A file name containing `(RTG)` selects `RTG_UAE` when the model is `Automatic`.
+`Machine > Model` has presets that start RTG games like WHDLoad games: load the game's LHA archive (or its directory) and it runs, on a machine that meets its requirements.
+
+With the model on `Automatic` the core picks the RTG preset by itself:
+
+| In the file name or the content | Preset |
+|---------------------------------|--------|
+| `(RTG)` or `(RTG040)` | A4000/040 RTG: UAE Zorro III |
+| `(RTG060)` | A4000/060 RTG: UAE Zorro III (the 040 one without `Mu680x0Libs.lha`) |
+| `(CV64)` | A4000/040 RTG: CyberVision 64 |
+| `RTG` as a word of the name (`AnotherWorld_AGA-RTG.lha`, `KoboDeluxe_RTG.lha`) | A4000/040 RTG: UAE Zorro III |
+| no WHDLoad slave and a program using `cybergraphics.library` or `Picasso96API.library` | A4000/040 RTG: UAE Zorro III |
+
+A game found by its name or content gets the RTG preset only when the support files are in `system/uae/RTG/`; otherwise it starts on the usual model (A1200 for an AGA version, for example) with a message saying what is missing. Games that use the graphics card without these libraries (FlashNG, for example) need the `(RTG)` tag.
 
 | Preset | Machine | Graphics card | Tested with |
 |--------|---------|---------------|-------------|
@@ -322,7 +336,7 @@ Support files, provided by the user, go in `system/uae/RTG/` (or `system/uae_dat
 These files are not included in the core: their licenses allow free distribution of the original archives, not bundling them in other software.
 
 - The core builds a system drive in `saves/RTG` from these files (their `Libs`, `Devs`, `C`, `L`, `Fonts` and `Classes` directories) and rebuilds it when the files change. It sets up the monitor driver of the preset's board, the AHI preferences (Paula, 8 bit stereo++, 22050 Hz) and the startup.
-- An archived game runs from a temporary copy in `saves/TEMP/RTG-<name>`, which is deleted when the game is closed. The files the game writes there (settings, high scores, converted data) are kept in `saves/RTG-Saves/<name>` and put back in place on the next start, so the game finds them again. Delete that folder to start the game afresh. A directory is used as it is, and the game writes straight into it.
+- An archived game runs from a temporary copy in `saves/TEMP/RTG-<name>`, which is deleted when the game is closed. The files the game writes there (settings, high scores, converted data) are kept in `saves/RTG-Saves/<name>` and put back in place on the next start, so the game finds them again. They are put back as hard links (instant, no extra space, even for hundreds of MB of converted data), or copied where the drive does not allow links. Delete that folder to start the game afresh. A directory is used as it is, and the game writes straight into it.
 - AmigaDOS sees the real free space of the drive that holds `saves` (it used to be a fixed 128 MB), so installers and data converters that check it before writing work.
 - The game is mounted as `DH0:` and its executable is found automatically: the one that uses `cybergraphics.library`, `Picasso96API.library` or `rtg.library`, otherwise the program named as its directory. Known ports get their arguments (Kobo Deluxe: `-fullscreen`). A text file `<game>.rtg` next to the game, or in `saves/RTG`, overrides it with a command line relative to `DH0:`, e.g. `KoboDeluxe/KoboDeluxe -fullscreen`.
 - A missing required file is shown as a message, with the folder to put it in.

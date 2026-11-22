@@ -62,7 +62,7 @@ extern char retro_temp_directory[RETRO_PATH_MAX];
 extern struct zfile *retro_deserialize_file;
 extern dc_storage *dc;
 extern retro_log_printf_t log_cb;
-extern long retro_ticks(void);
+extern long long retro_ticks(void);
 extern int RGBc(int r, int g, int b);
 extern int umain (int argc, TCHAR **argv);
 

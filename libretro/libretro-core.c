@@ -326,8 +326,9 @@ static struct {
 } output_audio_buffer = {NULL, 0, 0};
 
 /* FPS counter + mapper tick */
-long retro_ticks(void)
+long long retro_ticks(void)
 {
+   /* 64 bit: a 32-bit long (Windows) wraps the frontend's microseconds */
    if (!perf_cb.get_time_usec)
       return retro_now;
 
@@ -979,7 +980,7 @@ static void retro_set_core_options()
          "puae_model",
          "Machine > Model",
          "Model",
-         "'Automatic' defaults to 'A500' with floppy disks, 'A1200' with hard drives and 'CD32' with compact discs. 'Automatic' can be overridden with file path tags.\n'RTG' presets start RTG games (LHA archive or directory) automatically, like WHDLoad: A4000/040, 68040 + FPU, 64M Z3 Fast and the graphics card. They need in 'system/uae/RTG/' (or 'system/uae_data/RTG/'): a Workbench 3.x disk (ADF, zipped ADF works) and Picasso96.lha (aminet.net/driver/video/Picasso96.lha). Optional: m68k-amigaos-ahiusr.lha and AHI-Paula.lha (Aminet) for AHI sound, gtlayout.lha, an 'Extra' folder copied as is to the system drive. 'A4000/060' also needs Mu680x0Libs.lha (Aminet). 'CyberVision 64': the real board, slower than 'UAE'.\nCore restart required.",
+         "'Automatic' defaults to 'A500' with floppy disks, 'A1200' with hard drives and 'CD32' with compact discs. 'Automatic' can be overridden with file path tags. RTG games get an RTG preset with '(RTG)', '(RTG060)' or '(CV64)', with 'RTG' in the name, or when they use CyberGraphX/Picasso96 and have no WHDLoad slave.\n'RTG' presets start RTG games (LHA archive or directory) automatically, like WHDLoad: A4000/040, 68040 + FPU, 64M Z3 Fast and the graphics card. They need in 'system/uae/RTG/' (or 'system/uae_data/RTG/'): a Workbench 3.x disk (ADF, zipped ADF works) and Picasso96.lha (aminet.net/driver/video/Picasso96.lha). Optional: m68k-amigaos-ahiusr.lha and AHI-Paula.lha (Aminet) for AHI sound, gtlayout.lha, an 'Extra' folder copied as is to the system drive. 'A4000/060' also needs Mu680x0Libs.lha (Aminet). 'CyberVision 64': the real board, slower than 'UAE'.\nCore restart required.",
          NULL,
          "machine",
          {
@@ -8034,10 +8035,18 @@ static bool retro_create_config(void)
          /* Check if model is specified in the path on 'Automatic' */
          if (!strcmp(opt_model, "auto"))
          {
-            if (strstr(full_path, "(RTG)"))
+            char rtg_auto_msg[512];
+            const char *rtg_auto = rtg_auto_preset(full_path, retro_system_data_directory, rtg_auto_msg, sizeof(rtg_auto_msg));
+            if (rtg_auto_msg[0])
             {
-               log_cb(RETRO_LOG_INFO, "Found \"(RTG)\" in: \"%s\".\n", full_path);
-               retro_config_preset("RTG_UAE");
+               log_cb(RETRO_LOG_INFO, "%s\n", rtg_auto_msg);
+               snprintf(retro_message_msg, sizeof(retro_message_msg), "%s", rtg_auto_msg);
+               retro_message = true;
+            }
+            if (rtg_auto)
+            {
+               log_cb(RETRO_LOG_INFO, "RTG game: preset \"%s\" for \"%s\".\n", rtg_auto, full_path);
+               retro_config_preset(rtg_auto);
             }
             else if (strstr(full_path, "(A4060)") || strstr(full_path, "(060)"))
             {
@@ -10237,7 +10246,36 @@ void retro_run(void)
 
    /* Resume emulation for 1 frame (may_quit, resume) */
    libretro_runloop_active = true;
-   restart_pending = m68k_go(1, 1);
+   {
+      /* PUAE_PERF set in the environment: emulation time per frame in the
+       * log every 250 frames (speed measurements in a frontend) */
+      static int perf = -1, perf_n;
+      static retro_time_t perf_sum, perf_max, perf_wall0;
+      retro_time_t t0 = 0;
+      if (perf < 0)
+         perf = getenv("PUAE_PERF") != NULL && perf_cb.get_time_usec;
+      extern void libretro_frame_budget(void);
+      if (perf)
+         t0 = perf_cb.get_time_usec();
+      /* CPU Speed Max: this frame's CPU time starts now */
+      libretro_frame_budget();
+      restart_pending = m68k_go(1, 1);
+      if (perf)
+      {
+         retro_time_t t1 = perf_cb.get_time_usec(), d = t1 - t0;
+         perf_sum += d;
+         if (d > perf_max)
+            perf_max = d;
+         if (!perf_wall0)
+            perf_wall0 = t1;
+         if (++perf_n == 250)
+         {
+            log_cb(RETRO_LOG_INFO, "PERF: emulation %.1f ms/frame (max %.1f), %.1f frames/s wall, JIT %d\n",
+                  perf_sum / 250000.0, perf_max / 1000.0, 250 * 1000000.0 / (t1 - perf_wall0), (int)currprefs.cachesize);
+            perf_n = 0; perf_sum = perf_max = 0; perf_wall0 = t1;
+         }
+      }
+   }
    retro_now += 1000000 / retro_refresh;
 
    /* Handle statusbar text, audio filter type & video geometry + resolution */

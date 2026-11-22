@@ -4729,16 +4729,17 @@ static frame_time_t mavg(struct mavg_data *md, frame_time_t newval, int size)
 
 #define MAVG_VSYNC_SIZE 128
 int log_vsync, debug_vsync_min_delay, debug_vsync_forced_delay;
-static bool framewait(void)
-{
 #ifdef __LIBRETRO__
-	frame_shown = true;
-	/* "Fastest possible" CPU (cpu_speed=max): the frontend paces the frames,
-	 * so only set the CPU time budget of the frame that the line sync code
-	 * below (is_last_line/vsyncmaxtime) runs against. vsynctimebase is a
-	 * dummy 1 in libretro: the budget is in uae_time() units (microseconds),
-	 * 75% of a frame at the emulated refresh rate, the rest is left to the
-	 * frontend for video and audio. */
+/* "Fastest possible" CPU (cpu_speed=max): the frontend paces the frames, so
+ * only set the CPU time budget of the frame that the line sync code
+ * (is_last_line/vsyncmaxtime) runs against. vsynctimebase is a dummy 1 in
+ * libretro: the budget is in uae_time() units (microseconds), 75% of a frame
+ * at the emulated refresh rate, the rest is left to the frontend for video
+ * and audio. It starts when retro_run() is entered (libretro_frame_budget()):
+ * set at the emulated vsync, it would run out while the frontend presents
+ * the frame and waits for the host vsync, leaving the CPU almost no time. */
+void libretro_frame_budget(void)
+{
 	if (currprefs.m68k_speed < 0 && !cpu_sleepmode && !currprefs.cpu_memory_cycle_exact) {
 		frame_time_t now = read_processor_time();
 		int frame = (int)(1000000.0 / (fake_vblank_hz > 0 ? fake_vblank_hz : 50));
@@ -4750,6 +4751,12 @@ static bool framewait(void)
 			vsynctimeperline = 1;
 		vsyncmaxtime = now + max;
 	}
+}
+#endif
+static bool framewait(void)
+{
+#ifdef __LIBRETRO__
+	frame_shown = true;
 	return true;
 #endif
 	struct amigadisplay *ad = &adisplays[0];

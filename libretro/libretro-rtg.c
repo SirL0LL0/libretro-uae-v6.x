@@ -284,6 +284,44 @@ static int rtg_extract_all(const char *zdir, const char *root, const char *dst, 
    return copied;
 }
 
+/* Put the saved files of a game (<saves>/RTG-Saves/<name>) in its temporary
+ * copy: hard links where the file system allows (same drive: instant, no
+ * space, a game writing in place updates its save directly), copies
+ * otherwise. Some games keep hundreds of MB there (converted data). */
+static int rtg_link_tree(const char *src, const char *dst)
+{
+   RDIR *dir = retro_opendir(src);
+   int n = 0;
+   if (!dir)
+      return 0;
+   while (retro_readdir(dir))
+   {
+      const char *name = retro_dirent_get_name(dir);
+      char s[RETRO_PATH_MAX], d[RETRO_PATH_MAX];
+      if (name[0] == '.')
+         continue;
+      path_join(s, src, name);
+      path_join(d, dst, name);
+      if (path_is_directory(s))
+      {
+         path_mkdir(d);
+         n += rtg_link_tree(s, d);
+         continue;
+      }
+      remove(d);
+#ifdef _WIN32
+      if (CreateHardLinkA(d, s, NULL))
+#else
+      if (!link(s, d))
+#endif
+         n++;
+      else if (!fcopy(s, d))
+         n++;
+   }
+   retro_closedir(dir);
+   return n;
+}
+
 /* Copy a host directory tree verbatim (<RTG>/Extra) */
 static int rtg_copy_tree(const char *src, const char *dst)
 {
@@ -494,6 +532,192 @@ static void rtg_scan_dir(const char *host, const char *rel, struct rtg_exe *best
       }
    }
    retro_closedir(dir);
+}
+
+/* ------------------------------------------------------ Automatic model */
+
+/* An AmigaOS executable that opens an RTG API library */
+static bool rtg_uses_rtg_api(const uint8_t *buf, size_t len)
+{
+   static const char *libs[] = { "cybergraphics.library", "Picasso96API.library", NULL };
+   size_t j;
+   int i;
+   if (len < 4 || buf[0] || buf[1] || buf[2] != 0x03 || buf[3] != 0xf3)
+      return false;
+   for (i = 0; libs[i]; i++)
+   {
+      size_t n = strlen(libs[i]);
+      for (j = 0; j + n <= len; j++)
+         if (!strncasecmp((const char*)buf + j, libs[i], n))
+            return true;
+   }
+   return false;
+}
+
+/* What a file of the content says: -1 a WHDLoad slave (a WHDLoad game),
+ * 1 a program using an RTG API, 0 nothing */
+static int rtg_classify(const char *name, const uint8_t *buf, size_t len)
+{
+   if (strendswith(name, ".slave") || strendswith(name, ".Slave") || strendswith(name, ".SLAVE"))
+      return -1;
+   if (strendswith(name, ".library") || strendswith(name, ".device") || strendswith(name, ".info"))
+      return 0;
+   return buf && rtg_uses_rtg_api(buf, len) ? 1 : 0;
+}
+
+/* names_only: a first pass that only looks for WHDLoad slaves (no reading) */
+static int rtg_scan_archive(const char *zdir, int depth, bool names_only)
+{
+   struct zdirectory *zd;
+   TCHAR full[MAX_DPATH];
+   int found = 0;
+
+   if (depth > 8 || !(zd = zfile_opendir_archive_flags(zdir, ZFD_ARCHIVE)))
+      return 0;
+   while (found >= 0 && zfile_readdir_archive_3(zd, full, true))
+   {
+      int isdir = 0, flags = 0, c;
+      zfile_fill_file_attrs_archive(full, &isdir, &flags, NULL);
+      if (isdir > 0)
+         c = rtg_scan_archive(full, depth + 1, names_only);
+      else if (!isdir)
+      {
+         size_t len = 0;
+         uint8_t *buf = NULL;
+         if (!names_only && !strendswith(full, ".info") && !strendswith(full, ".slave") && !strendswith(full, ".Slave"))
+            buf = rtg_read_archive_file(full, &len);
+         c = rtg_classify(full, buf, len);
+         free(buf);
+      }
+      else
+         continue;
+      if (c < 0)
+         found = -1;
+      else if (c > 0)
+         found = 1;
+   }
+   zfile_closedir_archive(zd);
+   return found;
+}
+
+static int rtg_scan_host_dir(const char *host, int depth, bool names_only)
+{
+   RDIR *dir;
+   int found = 0;
+   if (depth > 6 || !(dir = retro_opendir(host)))
+      return 0;
+   while (found >= 0 && retro_readdir(dir))
+   {
+      const char *name = retro_dirent_get_name(dir);
+      char h[RETRO_PATH_MAX];
+      int c;
+      if (name[0] == '.')
+         continue;
+      path_join(h, host, name);
+      if (path_is_directory(h))
+         c = rtg_scan_host_dir(h, depth + 1, names_only);
+      else
+      {
+         size_t len = 0;
+         uint8_t *buf = NULL;
+         if (!names_only && path_get_size(h) < 8 * 1024 * 1024 && !strendswith(name, ".info"))
+            buf = rtg_read_file(h, &len);
+         c = rtg_classify(name, buf, len);
+         free(buf);
+      }
+      if (c < 0)
+         found = -1;
+      else if (c > 0)
+         found = 1;
+   }
+   retro_closedir(dir);
+   return found;
+}
+
+/* "rtg" as a word of the file name: AnotherWorld_AGA-RTG.lha, KoboDeluxe_RTG.lha */
+static bool rtg_name_tag(const char *content)
+{
+   const char *base = path_basename(content), *c;
+   for (c = base; (c = strcasestr(c, "rtg")); c++)
+   {
+      bool before = c == base || !isalnum((unsigned char)c[-1]);
+      bool after = !isalpha((unsigned char)c[3]);
+      if (before && after)
+         return true;
+   }
+   return false;
+}
+
+/* The support files the RTG presets need are there (names only: rtg_setup()
+ * checks the system drive it builds) */
+static bool rtg_support_files(const char *data_dir, bool need060)
+{
+   char srcdir[RETRO_PATH_MAX];
+   bool p96 = false, wb = false, mu = false;
+   RDIR *dir;
+   path_join(srcdir, data_dir, "RTG");
+   if (!(dir = retro_opendir(srcdir)))
+      return false;
+   while (retro_readdir(dir))
+   {
+      const char *name = retro_dirent_get_name(dir);
+      if (strcasestr(name, "picasso96"))
+         p96 = true;
+      else if (strcasestr(name, "mu680x0"))
+         mu = true;
+      else if (strcasestr(name, "workbench") || strendswith(name, ".adf") || strendswith(name, ".ADF")
+            || strendswith(name, ".adz") || strendswith(name, ".zip") || strendswith(name, ".ZIP"))
+         wb = true;
+   }
+   retro_closedir(dir);
+   return p96 && wb && (mu || !need060);
+}
+
+const char *rtg_auto_preset(const char *content, const char *data_dir, char *msg, size_t msg_size)
+{
+   const char *preset = NULL;
+   bool tagged = true;
+
+   msg[0] = 0;
+   /* Explicit tags */
+   if (strstr(content, "(CV64)"))
+      preset = "RTG_CV64";
+   else if (strstr(content, "(RTG060)"))
+      preset = "RTG_UAE060";
+   else if (strstr(content, "(RTG040)") || strstr(content, "(RTG)"))
+      preset = "RTG_UAE";
+   else
+   {
+      tagged = false;
+      /* "RTG" in the name, or a program using an RTG API and no WHDLoad slave */
+      if (rtg_name_tag(content))
+         preset = "RTG_UAE";
+      else if (path_is_directory(content))
+      {
+         if (rtg_scan_host_dir(content, 0, true) == 0 && rtg_scan_host_dir(content, 0, false) > 0)
+            preset = "RTG_UAE";
+      }
+      else if (rtg_scan_archive(content, 0, true) == 0 && rtg_scan_archive(content, 0, false) > 0)
+         preset = "RTG_UAE";
+   }
+   if (!preset)
+      return NULL;
+
+   /* The most suitable preset that can run: 060 needs Mu680x0Libs */
+   if (!strcmp(preset, "RTG_UAE060") && !rtg_support_files(data_dir, true) && rtg_support_files(data_dir, false))
+   {
+      log_cb(RETRO_LOG_INFO, "RTG: Mu680x0Libs.lha missing, the 68040 RTG preset instead.\n");
+      preset = "RTG_UAE";
+   }
+   /* Detected, not tagged: only when the support files are there, otherwise
+    * the usual model (e.g. A1200 for an AGA version) */
+   if (!tagged && !rtg_support_files(data_dir, false))
+   {
+      snprintf(msg, msg_size, "RTG game: put a Workbench 3.x disk and Picasso96.lha in \"%s%sRTG\" to start it on a graphics card.",
+            data_dir, DIR_SEP_STR);
+      return NULL;
+   }
+   return preset;
 }
 
 /* Command line override: "<game>.rtg" next to the content or in <saves>/RTG */
@@ -749,7 +973,14 @@ static int rtg_persist_walk(const char *root, const char *rel, const char *manif
          rtg_file_stamp(h, &size, &mtime);
          if (!rtg_manifest_has(manifest, r, size, mtime))
          {
+            long long ssize, smtime;
             path_join(d, saves, r);
+            /* The save is this very file (hard link, written in place) or
+             * the same: nothing to copy (copying a file onto a link to
+             * itself would truncate it) */
+            rtg_file_stamp(d, &ssize, &smtime);
+            if (ssize == size && smtime == mtime)
+               continue;
             rtg_mkdirs_for(d);
             if (!fcopy(h, d))
             {
@@ -824,11 +1055,12 @@ static void rtg_game_dir(const char *content, const char *save_dir, char *game, 
    /* The files the game wrote last time */
    if (path_is_directory(rtg_saves_dir))
    {
-      n = rtg_copy_tree(rtg_saves_dir, rtg_run_dir);
+      n = rtg_link_tree(rtg_saves_dir, rtg_run_dir);
       log_cb(RETRO_LOG_INFO, "RTG: %d saved file(s) restored from \"%s\"\n", n, rtg_saves_dir);
    }
 
-   if ((f = fopen(rtg_manifest, "w")))
+   /* binary: the lines are matched with "\n" endings */
+   if ((f = fopen(rtg_manifest, "wb")))
    {
       rtg_manifest_walk(rtg_run_dir, "", f);
       fclose(f);
