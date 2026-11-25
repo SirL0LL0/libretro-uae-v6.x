@@ -7511,6 +7511,12 @@ void restore_cpu_finish (void)
 	if (!currprefs.fpu_model)
 		fpu_reset();
 	init_m68k ();
+#ifdef __LIBRETRO__
+	/* The reset done for the restore turned the JIT cache off
+	 * (compemu_reset()); follow the restored CACR again, or the JIT
+	 * compiles nothing until the program writes CACR */
+	set_cpu_caches (true);
+#endif
 	m68k_setpc_normal (regs.pc);
 	doint ();
 	fill_prefetch_quick ();

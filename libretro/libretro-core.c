@@ -10444,7 +10444,13 @@ bool retro_load_game(const struct retro_game_info *info)
  * after a restart (model change + reset), which reallocates the RAM. */
 static void retro_update_memory_info(void)
 {
-   save_state_file_size = currprefs.chipmem.size + currprefs.bogomem.size + currprefs.fastmem[0].size + currprefs.z3fastmem[0].size;
+   save_state_file_size = currprefs.chipmem.size + currprefs.bogomem.size;
+   /* Every Zorro II/III RAM board (FRAM/ZRAM chunks) and the RTG board
+    * VRAM (PRAM chunk) */
+   for (int i = 0; i < MAX_RAM_BOARDS; i++)
+      save_state_file_size += currprefs.fastmem[i].size + currprefs.z3fastmem[i].size;
+   for (int i = 0; i < MAX_RTG_BOARDS; i++)
+      save_state_file_size += currprefs.rtgboards[i].rtgmem_size;
    /* Accelerator board and mainboard RAM (A3000 high/low, 25-bit, Z3 chip).
     * Boards report their RAM as cpuboardmem and also map it as 25-bit or
     * A3000 high memory, so take the larger of the two instead of the sum. */
